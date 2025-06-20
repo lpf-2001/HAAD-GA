@@ -11,7 +11,7 @@ import os
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__),'..'))
 sys.path.append(parent_dir)
 from DLWF_pytorch.model.model_1000 import * 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
 loss = nn.CrossEntropyLoss()
 
 
@@ -71,15 +71,17 @@ class Ant():
         self.model = model
         self.adv_trace = None    
         self.itermax = itermax
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
     def sensitive_generate(self, test_traces, select_p_num):
         """
+        假定seq_length = 5000
         向量化进行敏感性分析,返回每个代表位置插入一个包的对抗序列。
         test_traces: shape = (5000, 5000) 原始测试序列
         select_p_num: int 选择这么多个敏感位置
         """
-
+        test_traces = test_traces.squeeze()
         batch_size, seq_length = test_traces.shape
         positions_to_test = sorted(random.sample(range(seq_length), select_p_num))
 
@@ -107,10 +109,16 @@ class Ant():
         
         
         perturbed_traces, positions_to_test = self.sensitive_generate(test_traces,100)
+        #转为tensor
+        perturbed_traces = torch.tensor(perturbed_traces[:,:,:,np.newaxis]).to(self.device)
+        ground_truth = torch.tensor(ground_truth).to(self.device)
+        
         for i in range(len(positions_to_test)):
             logits = self.model(perturbed_traces[i])
             fit_results.append(self.fitness(logits,ground_truth))
         sorted_index = sorted(range(len(fit_results)),key = lambda i:fit_results[i],reverse=True)
+        
+        print("results: ",positions_to_test[sorted_index])
         return positions_to_test[sorted_index]
         
             
