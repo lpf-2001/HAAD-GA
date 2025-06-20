@@ -74,7 +74,7 @@ class Ant():
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-    def sensitive_generate(self, test_traces, select_p_num):
+    def sensitive_generate(self, test_traces):
         """
         假定seq_length = 5000
         向量化进行敏感性分析,返回每个代表位置插入一个包的对抗序列。
@@ -83,10 +83,11 @@ class Ant():
         """
         test_traces = test_traces.squeeze()
         batch_size, seq_length = test_traces.shape
-        positions_to_test = np.array(sorted(random.sample(range(seq_length), select_p_num)))
+        positions_to_test = np.array(sorted(random.sample(range(seq_length), 100)))#如果对所有点进行敏感性分析，就改成test_traces.shape[1]
+        # positions_to_test = np.array(range(1,seq_length))#对所有点进行敏感性分析
         
 
-        perturbed_traces = np.zeros((select_p_num, batch_size, seq_length + 1), dtype=test_traces.dtype)
+        perturbed_traces = np.zeros((100, batch_size, seq_length + 1), dtype=test_traces.dtype)#这里也是要改，如果所有点敏感性分析
 
         for i, pos in enumerate(positions_to_test):
             perturbed_traces[i, :, :pos] = test_traces[:, :pos]
@@ -111,7 +112,7 @@ class Ant():
         correct_results = []
         
         
-        perturbed_traces, positions_to_test = self.sensitive_generate(test_traces,100)
+        perturbed_traces, positions_to_test = self.sensitive_generate(test_traces)
         #转为tensor
         perturbed_traces = torch.tensor(perturbed_traces[:,:,:,np.newaxis]).to(self.device)
         ground_truth = torch.tensor(ground_truth).to(self.device)
