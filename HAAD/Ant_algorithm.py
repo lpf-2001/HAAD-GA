@@ -83,7 +83,8 @@ class Ant():
         """
         test_traces = test_traces.squeeze()
         batch_size, seq_length = test_traces.shape
-        positions_to_test = sorted(random.sample(range(seq_length), select_p_num))
+        positions_to_test = np.array(sorted(random.sample(range(seq_length), select_p_num)))
+        
 
         perturbed_traces = np.zeros((select_p_num, batch_size, seq_length + 1), dtype=test_traces.dtype)
 
@@ -92,11 +93,12 @@ class Ant():
             perturbed_traces[i, :, pos] = 1  # 注入虚拟包，方向固定为 +1
             perturbed_traces[i, :, pos+1:] = test_traces[:, pos:]
 
-        return perturbed_traces[:,:,:seq_length], positions_to_test  # shape = (select_p_num, batch, 5000)
+        return perturbed_traces[:,:,:seq_length], positions_to_test  # 都是array数组，shape = (select_p_num, 样本数, seq_length), 随机选择的敏感点
     
-    def fitness(self, logits, ground_truth):
+    def sensitive_fitness(self, logits, ground_truth):
         loss = F.cross_entropy(logits, ground_truth, reduction='mean')
-        return loss.item()
+        correct = (logits.argmax(-1)==ground_truth).sum().item()
+        return loss.item(),correct
         
     
     def sensitive_results(self,test_traces,ground_truth):
@@ -106,6 +108,7 @@ class Ant():
         ground_truth: shape = (5000,) 原数据集真实标签集合
         """
         fit_results = []
+        correct_results = []
         
         
         perturbed_traces, positions_to_test = self.sensitive_generate(test_traces,100)
@@ -114,11 +117,24 @@ class Ant():
         ground_truth = torch.tensor(ground_truth).to(self.device)
         
         for i in range(len(positions_to_test)):
-            logits = self.model(perturbed_traces[i])
-            fit_results.append(self.fitness(logits,ground_truth))
+            sum_fitness = 0
+            sum_correct = 0
+            for j in range(0,perturbed_traces.shape[1],100):
+                logits = self.model(perturbed_traces[i][j:j+100])
+                sum_fitness = sum_fitness + self.sensitive_fitness(logits,ground_truth[j:j+100])[0]
+                sum_correct = sum_correct + self.sensitive_fitness(logits,ground_truth[j:j+100])[1]
+            fit_results.append(sum_fitness)
+            correct_results.append(sum_correct)
+            
+        #储存结果，交叉熵损失结果，预测准确的样本结果
+        fit_results = np.array(fit_results)
+        correct_results = np.array(correct_results)
         sorted_index = sorted(range(len(fit_results)),key = lambda i:fit_results[i],reverse=True)
-        
+        print("loss:", fit_results[sorted_index])
+        print("correct:", correct_results[sorted_index])
         print("results: ",positions_to_test[sorted_index])
+        
+        #返回敏感插入位置
         return positions_to_test[sorted_index]
         
             
