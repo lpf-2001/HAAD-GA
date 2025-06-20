@@ -1,9 +1,7 @@
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
-import matplotlib.pyplot as plt
-import matplotlib.animation as animation
-import matplotlib.pyplot as plt
+import torch.nn.functional as F
 import random
 import torch
 import pdb
@@ -12,7 +10,7 @@ import sys
 import os
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__),'..'))
 sys.path.append(parent_dir)
-
+from DLWF_pytorch.model.model_1000 import * 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 loss = nn.CrossEntropyLoss()
 
@@ -73,6 +71,51 @@ class Ant():
         self.model = model
         self.adv_trace = None    
         self.itermax = itermax
+
+
+    def sensitive_generate(self, test_traces, select_p_num):
+        """
+        向量化进行敏感性分析,返回每个代表位置插入一个包的对抗序列。
+        test_traces: shape = (5000, 5000) 原始测试序列
+        select_p_num: int 选择这么多个敏感位置
+        """
+
+        batch_size, seq_length = test_traces.shape
+        positions_to_test = sorted(random.sample(range(seq_length), select_p_num))
+
+        perturbed_traces = np.zeros((select_p_num, batch_size, seq_length + 1), dtype=test_traces.dtype)
+
+        for i, pos in enumerate(positions_to_test):
+            perturbed_traces[i, :, :pos] = test_traces[:, :pos]
+            perturbed_traces[i, :, pos] = 1  # 注入虚拟包，方向固定为 +1
+            perturbed_traces[i, :, pos+1:] = test_traces[:, pos:]
+
+        return perturbed_traces[:,:,:seq_length], positions_to_test  # shape = (select_p_num, batch, 5000)
+    
+    def fitness(self, logits, ground_truth):
+        loss = F.cross_entropy(logits, ground_truth, reduction='mean')
+        return loss.item()
+        
+    
+    def sensitive_results(self,test_traces,ground_truth):
+        """
+        向量化进行敏感性分析,返回每个代表位置插入一个包的对抗序列。
+        test_traces: shape = (5000, 5000) 原始测试序列
+        ground_truth: shape = (5000,) 原数据集真实标签集合
+        """
+        fit_results = []
+        
+        
+        perturbed_traces, positions_to_test = self.sensitive_generate(test_traces,100)
+        for i in range(len(positions_to_test)):
+            logits = self.model(perturbed_traces[i])
+            fit_results.append(self.fitness(logits,ground_truth))
+        sorted_index = sorted(range(len(fit_results)),key = lambda i:fit_results[i],reverse=True)
+        return positions_to_test[sorted_index]
+        
+            
+            
+        
 
 
     def find_next_citySolution_fast(self,probtrans):
