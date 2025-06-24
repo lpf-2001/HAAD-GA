@@ -15,64 +15,23 @@ from DLWF_pytorch.model.model_1000 import *
 loss = nn.CrossEntropyLoss()
 
 
-# # #trace shape [Ncity,2], the shape of old_trace is [batch_size,200,1],返回值[batch_size,200,1]
-def generate_adv_trace(trace, old_trace):
-
-    # 提前检查 trace 是否为空
-    if trace.numel() == 0:
-        return old_trace
-
-    # 在 CPU 上对插入位置排序
-    insert_loc = torch.argsort(trace[:, 0].cpu()).to(trace.device)
-    adv_trace = trace[insert_loc]
-
-    # 向量化插入操作
-    insert_positions = adv_trace[:, 0].long()
-    insert_counts = adv_trace[:, 1].long()
-    
-    # 计算总插入偏移
-    total_insert = insert_counts.sum().item()
-    if total_insert == 0:
-        return old_trace
-
-    # 计算新 trace 的 shape
-    batch_size, seq_len, _ = old_trace.shape
-    new_seq_len = seq_len + total_insert
-    new_trace = torch.zeros((batch_size, new_seq_len, 1), device=old_trace.device)
-    prev_pos = 0
-    pos_offset = 0
-
-    # 逐步插入
-    for i in range(len(insert_positions)):
-        pos = insert_positions[i].item()
-        insert_num = insert_counts[i].item()
-        # 复制当前 segment
-        new_trace[:, prev_pos+pos_offset:pos+pos_offset, :] = old_trace[:, prev_pos:pos, :]
-
-        # 插入元素
-        if i == 0:
-            insert_val = old_trace[:, pos, :]
-        else:
-            insert_val = new_trace[:, pos, :]
-        
-        new_trace[:,pos+pos_offset: pos+pos_offset + insert_num, :] = insert_val.unsqueeze(1).expand(-1, insert_num, -1)
-        prev_pos = pos 
-        pos_offset += insert_num
-    # 复制剩余部分
-    new_trace[:, prev_pos+pos_offset:, :] = old_trace[:, prev_pos:, :]
-    return new_trace[:,:seq_len,:]
 
 
-class Ant():
-    def __init__(self, model, numant, max_insert, patches,itermax=10):
+class HAAD():
+    def __init__(self, model, original_trace, numant, max_inject, max_iter, alpha=1, beta=1, rho=0.1):
         self.numant = numant
-        self.max_insert = max_insert
-        self.patches = patches
-        self.model = model
-        self.adv_trace = None    
-        self.itermax = itermax
+        self.max_inject = max_inject
+        self.max_iter = max_iter
+        self.original_trace = original_trace.copy()
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+        self.model = model
+        self.alpha = alpha
+        self.beta = beta
+        self.rho = rho
+        self.positions = None
+        self.adv_trace = None    
+        self.tau = None
+        self.eta = None
 
     def sensitive_generate(self, test_traces):
         """
@@ -98,32 +57,32 @@ class Ant():
     
     def sensitive_fitness(self, logits, ground_truth):
         loss = F.cross_entropy(logits, ground_truth, reduction='mean')
-        correct = (logits.argmax(-1)==ground_truth).sum().item()
+        correct = (logits.argmax(-1)==ground_truth.argmax(-1)).sum().item()
         return loss.item(),correct
         
     
     def sensitive_results(self,test_traces,ground_truth):
         """
         向量化进行敏感性分析,返回每个代表位置插入一个包的对抗序列。
-        test_traces: shape = (5000, 5000) 原始测试序列
-        ground_truth: shape = (5000,) 原数据集真实标签集合
+        test_traces: shape = (5000, 5000, 1) 原始测试序列
+        ground_truth: shape = (5000,100) 原数据集真实标签集合
         """
+        # print(ground_truth.shape)
         fit_results = []
         correct_results = []
-        
-        
         perturbed_traces, positions_to_test = self.sensitive_generate(test_traces)
         #转为tensor
         perturbed_traces = torch.tensor(perturbed_traces[:,:,:,np.newaxis]).to(self.device)
-        ground_truth = torch.tensor(ground_truth).to(self.device)
+        ground_truth = ground_truth.clone().detach()
         
         for i in range(len(positions_to_test)):
             sum_fitness = 0
             sum_correct = 0
             for j in range(0,perturbed_traces.shape[1],100):
                 logits = self.model(perturbed_traces[i][j:j+100])
-                sum_fitness = sum_fitness + self.sensitive_fitness(logits,ground_truth[j:j+100])[0]
-                sum_correct = sum_correct + self.sensitive_fitness(logits,ground_truth[j:j+100])[1]
+                result = self.sensitive_fitness(logits,ground_truth[j:j+logits.shape[0]])
+                sum_fitness = sum_fitness + result[0]
+                sum_correct = sum_correct + result[1]
             fit_results.append(sum_fitness)
             correct_results.append(sum_correct)
             
@@ -131,101 +90,135 @@ class Ant():
         fit_results = np.array(fit_results)
         correct_results = np.array(correct_results)
         sorted_index = sorted(range(len(fit_results)),key = lambda i:fit_results[i],reverse=True)
-        print("loss:", fit_results[sorted_index])
-        print("correct:", correct_results[sorted_index])
-        print("results: ",positions_to_test[sorted_index])
+        # print("loss:", fit_results[sorted_index])
+        # print("correct:", correct_results[sorted_index])
+        # print("results: ",positions_to_test[sorted_index])
         
         #返回敏感插入位置
+        self.positions = positions_to_test[sorted_index]   #numpy shape:(num,)
+        self.tau = np.ones(len(self.positions))  # 信息素
+        self.eta = np.ones(len(self.positions))  # 启发因子（默认敏感度等权）
         return positions_to_test[sorted_index]
         
-            
-            
-        
+
+    def construct_solution(self):
+        # pdb.set_trace()
+        solutions = []
+        for _ in range(self.numant):
+            selected_indices = []
+            available = list(range(len(self.positions)))
+            for _ in range(self.max_inject):
+                probs = self.tau[available] ** self.alpha * self.eta[available] ** self.beta
+                probs = probs / np.sum(probs)
+                chosen_idx = np.random.choice(available, p=probs)
+                selected_indices.append(chosen_idx)
+                available.remove(chosen_idx)
+            selected_positions = [self.positions[i] for i in selected_indices]
+            solutions.append(selected_positions)
+        return solutions
 
 
-    def find_next_citySolution_fast(self,probtrans):
+
+    def apply_perturbation(self, solution, pad_values=None):
         """
-        使用 torch.multinomial() 直接进行批量概率采样，避免重复计算。
+        矢量化的最快实现
+        在3D数组的第二个维度的指定位置插入值
+        
+        参数:
+        - x: 3D数组 (batch_size, seq_len, features)
+        - positions: 插入位置的列表
+        - pad_values: 插入的值，可以是标量或数组
+        
+        返回:
+        - 在指定位置插入值后的数组（保持原长度）
         """
-        # 确保概率归一化
-        probtrans = probtrans / probtrans.sum()
-        # 生成 Ncity 个随机采样索引
-        indices = torch.multinomial(probtrans.flatten(), num_samples=self.patches, replacement=False)
+        # pdb.set_trace()
+        N = len(solution)
         
-        # 将 1D 索引转换为 2D 坐标
-        cities = torch.div(indices, probtrans.size(1), rounding_mode='trunc')
-        insert_packets = indices % probtrans.size(1)
-        # print(cities,"\n",insert_packets)
-
-        return cities, insert_packets
-
-
-
-    #批处理方式old_trace shape [batch_size,1,200], ground_truth shape [batch_size,100]
-    def run(self,old_trace,ground_truth,alpha=0.1,rho=0.15):#gamma调整奖励函数中损失函数的占比
-        # print("----------------Ant-algorithm------------")
-        numcity = max(old_trace.shape) ##// 城市个数
-        iter = 0
-        global_pheromonetable = torch.ones((self.numant, numcity, self.max_insert+1))/2 #// 信息素矩阵
-        sum_pheromone = torch.ones(numcity,self.max_insert+1)/3
-        global_pathtable = torch.zeros((self.numant, self.patches, 2))
-        numant_index = torch.arange(self.numant).to(device)
-        lengthbest = torch.zeros(1).to(device) #// 最佳路径对应的值
-        adv_loc_best = torch.zeros((self.patches,2)) #// 最佳路径
-        global_changepheromonetable = torch.zeros((self.numant,numcity,self.max_insert+1))
+        if pad_values is None:
+            pad_values = 1
+        if np.isscalar(pad_values):
+            pad_values = np.full(N, pad_values)
         
-        while (iter < self.itermax) and (sum_pheromone.sum() < 15000):
+        # 创建扩展后的数组
+        extended_length = self.original_trace.shape[1] + N
+        extended_x = np.zeros((self.original_trace.shape[0], extended_length, self.original_trace.shape[2]), dtype=self.original_trace.dtype)
+        
+        # 创建插入标记
+        insert_mask = np.zeros(extended_length, dtype=bool)
+        
+        # 对位置排序
+        sorted_indices = np.argsort(solution)
+        sorted_positions = solution[sorted_indices]
+        sorted_values = pad_values[sorted_indices]
+        
+        # 调整插入位置
+        adjusted_positions = sorted_positions + np.arange(N)
+        insert_mask[adjusted_positions] = True
+        
+        # 填充插入的值
+        for i, (pos, val) in enumerate(zip(adjusted_positions, sorted_values)):
+            extended_x[:, pos, :] = val
+        
+        # 填充原始数据
+        original_positions = np.where(~insert_mask)[0]
+        extended_x[:, original_positions, :] = self.original_trace
+        
+        # 截断到原长度
+        return extended_x[:, :self.original_trace.shape[1], :]
+
     
-            global_increase_loss = torch.zeros(self.numant,dtype=torch.float).to(device)  # 计算各个蚂蚁的路径距离 
-            probtrans = (sum_pheromone ** alpha)
-            # * ((8-charu_range[None, :]) ** beta)
+    def random_sample_without_replacement(self, num_samples=5000):
+        num_total = self.original_trace.shape[0]
+        if num_samples > num_total:
+            raise ValueError(f"Cannot sample {num_samples} from {num_total} without replacement")
+        # 生成不重复的随机索引
+        random_indices = np.random.choice(num_total, size=num_samples, replace=False)
+
+        return random_indices
+
+    def run(self, label):
+        # pdb.set_trace()
+        label = torch.tensor(label).to(self.device)
+        best_fitness = -float('inf')
+        best_solution = None
+        index = self.random_sample_without_replacement()
+        self.sensitive_results(self.original_trace[index],label[index])
         
+        for iteration in range(self.max_iter):
+            solutions = self.construct_solution()
+            solutions = np.array(solutions)
+            fitness_list = []
+            for solution in solutions:
+                perturbed_trace = self.apply_perturbation(solution)
+                
+                
+                fitness = 0
+                sum_correct = 0
+                print("perturbed_trace shape:",perturbed_trace.shape)
+                for j in range(0,perturbed_trace.shape[0],100):
+                    perturbed_trace_tensor = torch.tensor(perturbed_trace[j:j+100]).to(self.device)
+                    logits = self.model(perturbed_trace_tensor)
+                    print(label[j:j+logits.shape[0]].shape)
+                    result = self.sensitive_fitness(logits,label[j:j+logits.shape[0]])
+                    fitness = fitness + result[0]
+                    
+                    sum_correct = sum_correct + result[1]
+                print("sum_correct:",sum_correct)
+                fitness_list.append(fitness)
+                
 
-        # 创建线程池并提交任务
-            with ThreadPoolExecutor(max_workers=self.numant) as executor:
-                futures = [executor.submit(self.ant_task,probtrans,old_trace,ground_truth,numcity) for i in range(self.numant)]
-                # 收集每个线程的返回结果
-                count = 0
-                for future in as_completed(futures):
-                    result = future.result()
-                    global_increase_loss[count] = result[0]
-                    global_pathtable[count] = result[1]
-                    global_changepheromonetable[count] = result[2]
-                    count = count+1
-            # 包含所有蚂蚁的一个迭代结束后，统计本次迭代的若干统计参数
-            if global_increase_loss.max() > lengthbest:
-                lengthbest = global_increase_loss.max()
-                adv_loc_best = global_pathtable[global_increase_loss.argmax()].clone()
-            
-            global_pheromonetable[numant_index] = (1 - rho) * global_pheromonetable[numant_index] + global_changepheromonetable[numant_index]  # 计算信息素公式
-            sum_pheromone = global_pheromonetable.sum(dim=0)/self.numant
-            iter += 1  # 迭代次数指示器+1
-            if global_increase_loss.max() > old_trace.shape[0]*0.9:
-                break
+                # 更新最优解
+                if fitness > best_fitness:
+                    best_fitness = fitness
+                    best_solution = solution
 
-        return adv_loc_best
+            # 信息素更新
+            self.tau *= (1 - self.rho)
+            for i, fit in zip(solutions, fitness_list):
+                for idx in i:
+                    self.tau[idx] += fit
 
-    # 定义线程任务函数，每个任务会用到全局变量 global_table，但不能修改它
-    def ant_task(self,probtrans,old_trace,ground_truth,numcity):
+            print(f"[Iter {iteration}] Best fitness: {best_fitness:.4f}")
 
-        pathtable = torch.zeros((self.patches, 2),dtype=torch.int) #// 路径记录表
-        cities, insert_packets = self.find_next_citySolution_fast(probtrans)
-        pathtable[:, 0] = cities
-        pathtable[:, 1] = insert_packets
-        adv_trace = generate_adv_trace(pathtable,old_trace)
-        # 构造好流之后计算模型loss
-        predict = self.model(adv_trace)
-        # print(adv_trace.shape)
-        batch_acc = (predict.argmax(-1)==ground_truth.argmax(-1)).sum().float()
-
-        adv_num = predict.shape[0]-batch_acc
-        # 信息素更新向量化计算
-        changepheromonetable = torch.zeros((numcity, self.max_insert + 1), device=probtrans.device)
-        
-        changepheromonetable[cities, insert_packets] += (adv_num.cpu())/predict.shape[0]
-
-        return adv_num,pathtable,changepheromonetable
-
-
-
-
+        return best_solution, best_fitness
