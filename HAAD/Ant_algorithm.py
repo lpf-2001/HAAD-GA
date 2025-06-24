@@ -42,11 +42,11 @@ class HAAD():
         """
         test_traces = test_traces.squeeze()
         batch_size, seq_length = test_traces.shape
-        positions_to_test = np.array(sorted(random.sample(range(seq_length), 100)))#如果对所有点进行敏感性分析，就改成test_traces.shape[1]
-        # positions_to_test = np.array(range(1,seq_length))#对所有点进行敏感性分析
+        # positions_to_test = np.array(sorted(random.sample(range(seq_length), 100)))#如果对所有点进行敏感性分析，就改成test_traces.shape[1]
+        positions_to_test = np.array(range(1,seq_length))#对所有点进行敏感性分析
         
 
-        perturbed_traces = np.zeros((100, batch_size, seq_length + 1), dtype=test_traces.dtype)#这里也是要改，如果所有点敏感性分析
+        perturbed_traces = np.zeros((seq_length, batch_size, seq_length + 1), dtype=test_traces.dtype)#这里也是要改，如果所有点敏感性分析,第一个维度改为seq_length
 
         for i, pos in enumerate(positions_to_test):
             perturbed_traces[i, :, :pos] = test_traces[:, :pos]
@@ -90,14 +90,11 @@ class HAAD():
         fit_results = np.array(fit_results)
         correct_results = np.array(correct_results)
         sorted_index = sorted(range(len(fit_results)),key = lambda i:fit_results[i],reverse=True)
-        # print("loss:", fit_results[sorted_index])
-        # print("correct:", correct_results[sorted_index])
-        # print("results: ",positions_to_test[sorted_index])
         
         #返回敏感插入位置
         self.positions = positions_to_test[sorted_index]   #numpy shape:(num,)
-        self.tau = np.ones(len(self.positions))  # 信息素
-        self.eta = np.ones(len(self.positions))  # 启发因子（默认敏感度等权）
+        self.tau = np.ones(test_traces.shape[1])  # 信息素
+        self.eta = np.ones(test_traces.shape[1])  # 启发因子（默认敏感度等权）
         return positions_to_test[sorted_index]
         
 
@@ -181,8 +178,10 @@ class HAAD():
         # pdb.set_trace()
         label = torch.tensor(label).to(self.device)
         best_fitness = -float('inf')
+        best_correct = -float('inf')
         best_solution = None
         index = self.random_sample_without_replacement()
+        #敏感性分析，找出
         self.sensitive_results(self.original_trace[index],label[index])
         
         for iteration in range(self.max_iter):
@@ -195,11 +194,11 @@ class HAAD():
                 
                 fitness = 0
                 sum_correct = 0
-                print("perturbed_trace shape:",perturbed_trace.shape)
+                # print("perturbed_trace shape:",perturbed_trace.shape)
                 for j in range(0,perturbed_trace.shape[0],100):
                     perturbed_trace_tensor = torch.tensor(perturbed_trace[j:j+100]).to(self.device)
                     logits = self.model(perturbed_trace_tensor)
-                    print(label[j:j+logits.shape[0]].shape)
+                    # print(label[j:j+logits.shape[0]].shape)
                     result = self.sensitive_fitness(logits,label[j:j+logits.shape[0]])
                     fitness = fitness + result[0]
                     
@@ -212,6 +211,7 @@ class HAAD():
                 if fitness > best_fitness:
                     best_fitness = fitness
                     best_solution = solution
+                    best_correct = sum_correct
 
             # 信息素更新
             self.tau *= (1 - self.rho)
@@ -219,6 +219,6 @@ class HAAD():
                 for idx in i:
                     self.tau[idx] += fit
 
-            print(f"[Iter {iteration}] Best fitness: {best_fitness:.4f}")
+            print(f"[Iter {iteration}] Best fitness: {best_fitness:.4f} Defense rate: {best_correct/self.original_trace.shape[0]:.4f}")
 
         return best_solution, best_fitness
