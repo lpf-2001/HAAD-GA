@@ -8,18 +8,19 @@ from torch.utils.data import DataLoader, TensorDataset
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class Tor_cnn(nn.Module):
-    def __init__(self):
+    def __init__(self, in_dim, out_dim):
         super(Tor_cnn,self).__init__()
-        self.dropout = nn.Dropout(p=0.25)
+        self.dropout = nn.Dropout(p=0.1)
         self.conv1 = nn.Conv1d(in_channels=1, out_channels=32,kernel_size=2,padding='valid',stride=1)
         self.conv2 = nn.Conv1d(in_channels=32, out_channels=64,kernel_size=2,padding='valid',stride=1)
         self.conv3 = nn.Conv1d(in_channels=64, out_channels=128,kernel_size=4,padding='valid',stride=1)
-        self.conv4 = nn.Conv1d(in_channels=128, out_channels=128,kernel_size=2,padding='valid',stride=1)
+        self.conv4 = nn.Conv1d(in_channels=128, out_channels=256,kernel_size=2,padding='valid',stride=1)
+        self.conv5 = nn.Conv1d(in_channels=256, out_channels=128,kernel_size=2,padding='valid',stride=1)
         self.maxpool1 = nn.MaxPool1d(kernel_size=2,padding=0)
         self.lstm = nn.LSTM(input_size=22, hidden_size=64, num_layers=1, batch_first=True)
-        self.dense1 = nn.Linear(in_features=1408, out_features=256)
-        self.dense2 = nn.Linear(in_features=256, out_features=128)
-        self.dense3 = nn.Linear(in_features=128, out_features=100)
+        self.dense1 = nn.Linear(in_features=19840, out_features=2560)
+        self.dense2 = nn.Linear(in_features=2560, out_features=128)
+        self.dense3 = nn.Linear(in_features=128, out_features=out_dim)
     def forward(self,x):
   
         x = x.transpose(1,2)
@@ -36,6 +37,9 @@ class Tor_cnn(nn.Module):
         x = self.conv4(x)
         x = nn.functional.relu(x)
         x = self.maxpool1(x)
+        x = self.conv5(x)
+        x = nn.functional.relu(x)
+        x = self.maxpool1(x)
         # x, (hn, cn) = self.lstm(x)
         # x = x[:,-1,:]
         # print(x.shape)
@@ -43,8 +47,8 @@ class Tor_cnn(nn.Module):
         x = self.dense1(x)
         x = self.dense2(x)
         x = self.dense3(x)
-        x = torch.sigmoid(x)
-        x = nn.functional.softmax(x,dim=-1)
+        # x = torch.sigmoid(x)
+        
         return x
         
         
@@ -74,6 +78,7 @@ class Tor_lstm(nn.Module):
         out = self.fc(out[:, -1, :])  # 使用序列的最后一个时间步的输出作为全连接层的输入
         return out
     
+
 
 
 
@@ -132,11 +137,11 @@ def train_model(i, train_loader,autoencoder,layer):
     autoencoder.train()
     # Select the optimizer
     if optimizer_type == 'sgd':
-        optimizer = optim.SGD(autoencoder.parameters(), lr=layer['sgd'].as_float('lr'), momentum=layer['sgd'].as_float('momentum'), weight_decay=layer['sgd'].as_float('decay'))
-    elif optimizer_type == 'adam':
-        optimizer = optim.Adam(autoencoder.parameters(), lr=layer['adam'].as_float('lr'), weight_decay=layer['adam'].as_float('decay'))
+        optimizer = optim.SGD(autoencoder.parameters(), lr=layer['sgd'].as_float('learning_rate'), momentum=layer['sgd'].as_float('momentum'), weight_decay=layer['sgd'].as_float('decay'))
+    elif optimizer_type == 'adamax':
+        optimizer = optim.Adamax(autoencoder.parameters(), lr=layer['adamax'].as_float('learning_rate'))
     elif optimizer_type == 'rmsprop':
-        optimizer = optim.RMSprop(autoencoder.parameters(), lr=layer['rmsprop'].as_float('lr'), weight_decay=layer['rmsprop'].as_float('decay'))
+        optimizer = optim.RMSprop(autoencoder.parameters(), lr=layer['rmsprop'].as_float('learning_rate'))
 
     criterion = nn.MSELoss()
     autoencoder.train()
@@ -224,7 +229,7 @@ def make_layer(i, layer,  train_loader, test_loader, steps=0, gen=False):
 
 def build_model(learn_params, train_gen, test_gen, steps=0, pre_train=True):
     layers = learn_params["layers"]
-    nb_classes = learn_params.as_int('nb_classes')
+    nb_classes = 95
     sae = StackedAutoencoder(layers,nb_classes=nb_classes).to(device)
     
     if pre_train:
@@ -239,43 +244,85 @@ def build_model(learn_params, train_gen, test_gen, steps=0, pre_train=True):
 class Tor_ensemble_model(nn.Module):
     def __init__(self,model1,model2,model3):
         super(Tor_ensemble_model, self).__init__()
-        self.fc1 = nn.Linear(in_features=100, out_features=100, bias=False)
-        self.fc2 = nn.Linear(in_features=100, out_features=100, bias=False)
-        self.fc3 = nn.Linear(in_features=100, out_features=100, bias=False)
+        self.fc1 = nn.Linear(in_features=95, out_features=95, bias=False)
+        self.fc2 = nn.Linear(in_features=95, out_features=95, bias=False)
+        self.fc3 = nn.Linear(in_features=95, out_features=95, bias=False)
+        self.dropout = nn.Dropout(0.1)
         self.model1 = model1
         self.model2 = model2
         self.model3 = model3
 
-    def forward(self, x):    
+    def calculate_weighted_tensor(self, fc_layer, input_tensor):
+        """
+        计算加权张量
+        :param fc_layer: 全连接层
+        :param input_tensor: 输入张量
+        :return: 加权张量
+        """
+        # 检查输入张量的维度
+        if input_tensor.dim() != 2:
+            raise ValueError("Input tensor should be 2-dimensional.")
+        print(f"input shape:{input_tensor.shape}")
+        batch_size = input_tensor.shape[0]
+        # 应用全连接层并求和
+        weighted_sum = torch.sum(fc_layer(input_tensor), dim=0)
+        # 计算平均值
+        weighted_tensor = weighted_sum / batch_size
+        # 扩展维度以匹配输入张量的形状
+        weighted_tensor = weighted_tensor.unsqueeze(0).expand(batch_size, -1)
+        return weighted_tensor
+    # def forward(self, x):    
     
-        x2 = self.model2(x)  #接受（batch_size,200,1） 
+    #     x2 = self.model2(x)  #接受（batch_size,200,1） 
 
-        x1 = self.model1(x)  
+    #     x1 = self.model1(x)  
+    #     x3 = self.model3(x)
+    #     # print(f"x1 shape:{x1.shape}")
+    
+    #     # 为每个张量应用不同的全连接层
+    #     weighted_tensor1 = torch.sum(self.fc1(x1),0)/(x1.shape[0])
+    #     # print(f"weight1 shape:{weighted_tensor1.shape}")
+    #     weighted_tensor2 = torch.sum(self.fc1(x2),0)/(x1.shape[0])
+    #     weighted_tensor3 = torch.sum(self.fc1(x3),0)/(x1.shape[0])
+    #     weighted_tensor1 = weighted_tensor1.expand(x1.shape[0],x1.shape[1])
+    #     weighted_tensor2 = self.fc2(x2).expand(x1.shape[0],x1.shape[1])
+    #     weighted_tensor3 = self.fc3(x3).expand(x1.shape[0],x1.shape[1])
+    #     # print(f"weight2 shape:{weighted_tensor1.shape}")
+
+
+
+
+    #     # 对每个张量应用相应的权重进行逐元素相乘
+    #     result1 = x1 * weighted_tensor1
+    #     result2 = x2 * weighted_tensor2
+    #     result3 = x3 * weighted_tensor3
+
+    #     # 如果需要，可以将结果合并，例如逐元素求和
+    #     final_result = result1 + result2 + result3
+    #     return final_result
+    def forward(self, x):
+        # 通过不同模型得到输出
+        x1 = self.model1(x)
+        
+        x2 = self.model2(x)
+        
         x3 = self.model3(x)
-        # print(f"x1 shape:{x1.shape}")
-    
+        x1 = self.dropout(x1)
+        x2 = self.dropout(x2)
+        x3 = self.dropout(x3)
         # 为每个张量应用不同的全连接层
-        weighted_tensor1 = torch.sum(self.fc1(x1),0)/(x1.shape[0])
-        # print(f"weight1 shape:{weighted_tensor1.shape}")
-        weighted_tensor2 = torch.sum(self.fc1(x2),0)/(x1.shape[0])
-        weighted_tensor3 = torch.sum(self.fc1(x3),0)/(x1.shape[0])
-        weighted_tensor1 = weighted_tensor1.expand(x1.shape[0],x1.shape[1])
-        weighted_tensor2 = self.fc2(x2).expand(x1.shape[0],x1.shape[1])
-        weighted_tensor3 = self.fc3(x3).expand(x1.shape[0],x1.shape[1])
-        # print(f"weight2 shape:{weighted_tensor1.shape}")
-
-
-
+        weighted_tensor1 = self.calculate_weighted_tensor(self.fc1, x1)
+        weighted_tensor2 = self.calculate_weighted_tensor(self.fc2, x2)
+        weighted_tensor3 = self.calculate_weighted_tensor(self.fc3, x3)
 
         # 对每个张量应用相应的权重进行逐元素相乘
         result1 = x1 * weighted_tensor1
         result2 = x2 * weighted_tensor2
         result3 = x3 * weighted_tensor3
 
-        # 如果需要，可以将结果合并，例如逐元素求和
+        # 将结果合并，逐元素求和
         final_result = result1 + result2 + result3
         return final_result
-
 
 
 
@@ -443,14 +490,14 @@ class DFNet(nn.Module):
 
         self.fc1 = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(256, 512),
-            nn.BatchNorm1d(512),
+            nn.Linear(4864, 5120),
+            nn.BatchNorm1d(5120),
             nn.ReLU(),
             nn.Dropout(0.7)
         )
 
         self.fc2 = nn.Sequential(
-            nn.Linear(512, 512),
+            nn.Linear(5120, 512),
             nn.BatchNorm1d(512),
             nn.ReLU(),
             nn.Dropout(0.5)
