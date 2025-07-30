@@ -64,21 +64,18 @@ class HAAD():
             perturbed_traces[:,:pos] = test_traces[:,:pos]
             perturbed_traces[:, pos] = 1  # 注入虚拟包，方向固定为 +1
             perturbed_traces[:, pos+1:] = test_traces[:, pos:]
-            
             perturbed_traces = perturbed_traces[:,:5000]
             
             sum_fitness = 0
-            for j in range(0,perturbed_traces.shape[0],64):
-                perturbed_traces_tensor = torch.tensor(perturbed_traces[j:j+64]).to(self.device).unsqueeze(-1)
-                logits = self.model(perturbed_traces_tensor)
+            for j in range(0,perturbed_traces.shape[0],32):
+                perturbed_traces_tensor = torch.tensor(perturbed_traces[j:j+32]).to(self.device).unsqueeze(-1)
+                with torch.no_grad():
+                    logits = self.model(perturbed_traces_tensor)
                 result = self.sensitive_fitness(logits,ground_truth[j:j+logits.shape[0]].to(self.device))
                 sum_fitness = sum_fitness + result[0]
             self.eta[pos] = sum_fitness/perturbed_traces.shape[0]
             print("self.eta[",pos,"]:"," ",self.eta[pos])
             fit_results.append(sum_fitness)
-            
-    
-            
             
         #返回敏感插入位置
         self.eta = (self.eta - self.eta.min()) / (self.eta.max() - self.eta.min() + 1e-8)
@@ -183,12 +180,12 @@ class HAAD():
                 fitness = 0
                 sum_correct = 0
                 # print("perturbed_trace shape:",perturbed_trace.shape)
-                for j in range(0,perturbed_trace.shape[0],64):
-                    perturbed_trace_tensor = torch.tensor(perturbed_trace[j:j+64]).to(self.device)
-                    logits = self.model(perturbed_trace_tensor)
-                    # print(label[j:j+logits.shape[0]].shape)
+                for j in range(0,perturbed_trace.shape[0],32):
+                    perturbed_trace_tensor = torch.tensor(perturbed_trace[j:j+32]).to(self.device)
+                    with torch.no_grad():
+                        logits = self.model(perturbed_traces_tensor)
+
                     result = self.sensitive_fitness(logits,label[j:j+logits.shape[0]])
-                    # print(f"iter: {iteration}, loss: {result[0]}")
                     fitness = fitness + result[0]
                     
                     sum_correct = sum_correct + result[1]
@@ -212,5 +209,7 @@ class HAAD():
             self.tau = (self.tau - self.tau.min()) / (self.tau.max() - self.tau.min() + 1e-8)
             
             print(f"[Iter {iteration}] Best fitness: {best_fitness:.4f} 攻击成功样本率 {1-(best_correct/self.original_trace.shape[0]):.4f}",self.original_trace.shape[0]-best_correct,"/",self.original_trace.shape[0])
+            torch.cuda.empty_cache()     # 释放未使用显存回操作系统
+            torch.cuda.ipc_collect()     # 收集 IPC 共享内存
 
         return best_solution, best_fitness
