@@ -14,7 +14,7 @@ sys.path.append(parent_dir)
 
 loss = nn.CrossEntropyLoss()
 
-
+batch_size = 32
 
 
 class HAAD():
@@ -23,6 +23,7 @@ class HAAD():
         self.max_inject = max_inject
         self.max_iter = max_iter
         self.original_trace = original_trace.copy()
+        self.best_solution = None
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model
         self.alpha = alpha
@@ -67,8 +68,8 @@ class HAAD():
             perturbed_traces = perturbed_traces[:,:5000]
             
             sum_fitness = 0
-            for j in range(0,perturbed_traces.shape[0],32):
-                perturbed_traces_tensor = torch.tensor(perturbed_traces[j:j+32]).to(self.device).unsqueeze(-1)
+            for j in range(0,perturbed_traces.shape[0],batch_size):
+                perturbed_traces_tensor = torch.tensor(perturbed_traces[j:j+batch_size]).to(self.device).unsqueeze(-1)
                 with torch.no_grad():
                     logits = self.model(perturbed_traces_tensor)
                 result = self.sensitive_fitness(logits,ground_truth[j:j+logits.shape[0]].to(self.device))
@@ -161,12 +162,30 @@ class HAAD():
 
         return random_indices
 
+    def verification_perturbation(model):
+      
+        perturbed_trace = self.apply_perturbation(solution)
+        fitness = 0
+        sum_correct = 0
+        for j in range(0,perturbed_trace.shape[0],batch_size):
+            perturbed_trace_tensor = torch.tensor(perturbed_trace[j:j+batch_size]).to(self.device)
+            with torch.no_grad():
+                logits = model(perturbed_traces_tensor)
+
+            result = self.sensitive_fitness(logits,label[j:j+logits.shape[0]])
+            fitness = fitness + result[0]
+        
+            sum_correct = sum_correct + result[1]
+        print("sum_correct:",sum_correct,"fit:",fitness/64)
+
+
+        
+    
     def run(self, label):
         label = torch.tensor(label)
         
         best_fitness = -float('inf')
         best_correct = -float('inf')
-        best_solution = None
         index = self.random_sample_without_replacement()
         #敏感性分析，找出各个点的插入敏感性
         self.sensitive_results(self.original_trace[index],label[index])
@@ -180,8 +199,8 @@ class HAAD():
                 fitness = 0
                 sum_correct = 0
                 # print("perturbed_trace shape:",perturbed_trace.shape)
-                for j in range(0,perturbed_trace.shape[0],32):
-                    perturbed_trace_tensor = torch.tensor(perturbed_trace[j:j+32]).to(self.device)
+                for j in range(0,perturbed_trace.shape[0],batch_size):
+                    perturbed_trace_tensor = torch.tensor(perturbed_trace[j:j+batch_size]).to(self.device)
                     with torch.no_grad():
                         logits = self.model(perturbed_traces_tensor)
 
@@ -194,7 +213,7 @@ class HAAD():
                 # 更新最优解
                 if fitness > best_fitness:
                     best_fitness = fitness
-                    best_solution = solution
+                    self.best_solution = solution
                     best_correct = sum_correct
             fitness_list = np.array(fitness_list)
     
@@ -212,4 +231,4 @@ class HAAD():
             torch.cuda.empty_cache()     # 释放未使用显存回操作系统
             torch.cuda.ipc_collect()     # 收集 IPC 共享内存
 
-        return best_solution, best_fitness
+        return self.best_solution, best_fitness
