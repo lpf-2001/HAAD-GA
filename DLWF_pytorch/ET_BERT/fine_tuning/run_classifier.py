@@ -59,8 +59,10 @@ class Classifier(nn.Module):
     def process_emb(self, emb):
         # emb: [B, L, H] -> Conv1d expects [B, H, L]
         x = emb.transpose(1, 2)   # [B, H, L]
-        x = self.conv(x)          # 卷积，长度L不变
-        x = self.pool(x)          # 池化，长度变成 target_length
+        x = nn.Linear(x.size(-1),256).to(self.device)(x)
+        x = nn.Linear(256,128).to(self.device)(x)
+        # x = self.conv(x)          # 卷积，长度L不变
+        # x = self.pool(x)          # 池化，长度变成 target_length
         x = x.transpose(1, 2)     # [B, target_length, H]
         return x
 
