@@ -5,9 +5,10 @@ import numpy as np
 import os
 import sys
 import argparse
-from torchsummary import summary
 import torch
 import torch.optim as optim
+from torchsummary import summary
+from torch.cuda.amp import autocast, GradScaler
 from torch.utils.data import DataLoader, Dataset, random_split, Subset
 from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score, roc_auc_score
 from tqdm import tqdm 
@@ -48,6 +49,8 @@ def log(id, s, dnn=None):
         l = open('./trained_model/df.out',"a")
     elif dnn == "VARCNN":
         l = open('./trained_model/varcnn.out',"a")
+    elif dnn == "LLM":
+        l = open('./trained_model/llm.out',"a")
     if(id is not None):
         l.write("ID {} {}>\t{}\n".format(id,curtime().strftime('%H:%M:%S'),s))
     else:
@@ -118,17 +121,17 @@ def train_model(model,learn_param,model_train=True,train_loader=None,val_loader=
         accuracy = 0        
         with tqdm(train_loader, unit="batch") as tepoch:
             for batch_x, batch_y in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}"):
-                # print(f"batch_x shape:{batch_x.shape}") 
+                print(f"batch_x shape:{batch_x.shape}") 
                 tepoch.set_description(f"Epoch {epoch+1}")
                 count = count + batch_y.size(0)
                 optimizer.zero_grad()
 
                 batch_x_tensor, batch_y_tensor = batch_x.float().to(device), batch_y.float().to(device)
-                outputs = model(batch_x_tensor)
-
+                with autocast():
+                    outputs = model(batch_x_tensor)
+                    loss = criterion(outputs,batch_y_tensor.argmax(1))
                 batch_accuracy= (outputs.argmax(1) == batch_y_tensor.argmax(1)).sum().item()/batch_y_tensor.shape[0]
                 accuracy = accuracy + (outputs.argmax(1) == batch_y_tensor.argmax(1)).sum().item()
-                loss = criterion(outputs,batch_y_tensor.argmax(1))
                 loss.backward()
                 optimizer.step()
                 tepoch.set_postfix(loss=loss, accuracy=batch_accuracy)
@@ -146,9 +149,6 @@ def train_model(model,learn_param,model_train=True,train_loader=None,val_loader=
                     if torch.cuda.is_available():
                         inputs, labels = inputs.float().to(device), labels.float().to(device)
                         outputs = model(inputs)
-
-                    # print("outputs", outputs.device)
-                    # print("labels", labels.device)
                     loss = criterion(outputs, labels.argmax(1))
                     val_loss += loss.item()
                     val_total += labels.size(0)
@@ -198,7 +198,8 @@ def train_model(model,learn_param,model_train=True,train_loader=None,val_loader=
                     torch.save(model.state_dict(),"./trained_model/length_5000/df_5000.pth") 
                 elif model_type == "VARCNN":
                     torch.save(model.state_dict(),"./trained_model/length_5000/varcnn_5000.pth")
-                    
+                elif model_type == "LLM":
+                    torch.save(model.state_dict(),"./trained_model/length_5000/llm_5000.pth")
                 best_f1 = f1
           
 
@@ -246,6 +247,9 @@ def main(model_type,model_train):
                             ).to(device)
         model = Tor_ensemble_model(model1,model2,model3).to(device)
         train_model(model,config[model_type],model_train=model_train)
+    elif model_type == "llm":
+        model = LLM(input_len=5000, num_classes=100, embed_dim=128, num_layers=4, num_heads=8).to(device)
+        train_model(model,config[model_type],model_train=model_train)
     
 
 
@@ -253,7 +257,7 @@ def main(model_type,model_train):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train and test a deep neural network (SDAE, CNN or LSTM)')
 
-    parser.add_argument('--model', '-m', default='cnn', type=str, choices=['cnn','lstm','sdae','ensemble','df','varcnn'],
+    parser.add_argument('--model', '-m', default='cnn', type=str, choices=['cnn','lstm','sdae','ensemble','df','varcnn',"llm"],
                         help='choose model type cnn, lstm or sdae')
     # parser.add_argument('--check_input', '-cha', default=False, type=bool, choices=[True,False],
     #                     help='view dataset')
