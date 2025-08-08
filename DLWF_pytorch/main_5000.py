@@ -121,7 +121,7 @@ def train_model(model,learn_param,model_train=True,train_loader=None,val_loader=
         accuracy = 0        
         with tqdm(train_loader, unit="batch") as tepoch:
             for batch_x, batch_y in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}"):
-                print(f"batch_x shape:{batch_x.shape}") 
+                # print(f"batch_x shape:{batch_x.shape}") 
                 tepoch.set_description(f"Epoch {epoch+1}")
                 count = count + batch_y.size(0)
                 optimizer.zero_grad()
@@ -248,7 +248,9 @@ def main(model_type,model_train):
         model = Tor_ensemble_model(model1,model2,model3).to(device)
         train_model(model,config[model_type],model_train=model_train)
     elif model_type == "llm":
-        model = LLM(input_len=5000, num_classes=100, embed_dim=128, num_layers=4, num_heads=8).to(device)
+        model = LLM(input_len=5000, num_classes=100,
+                                         embed_dim=64, conv_channels=128,
+                                         downsample_layers=3, attn_heads=8).to(device)
         train_model(model,config[model_type],model_train=model_train)
     
 

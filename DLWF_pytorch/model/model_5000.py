@@ -271,35 +271,6 @@ class Tor_ensemble_model(nn.Module):
         # 扩展维度以匹配输入张量的形状
         weighted_tensor = weighted_tensor.unsqueeze(0).expand(batch_size, -1)
         return weighted_tensor
-    # def forward(self, x):    
-    
-    #     x2 = self.model2(x)  #接受（batch_size,200,1） 
-
-    #     x1 = self.model1(x)  
-    #     x3 = self.model3(x)
-    #     # print(f"x1 shape:{x1.shape}")
-    
-    #     # 为每个张量应用不同的全连接层
-    #     weighted_tensor1 = torch.sum(self.fc1(x1),0)/(x1.shape[0])
-    #     # print(f"weight1 shape:{weighted_tensor1.shape}")
-    #     weighted_tensor2 = torch.sum(self.fc1(x2),0)/(x1.shape[0])
-    #     weighted_tensor3 = torch.sum(self.fc1(x3),0)/(x1.shape[0])
-    #     weighted_tensor1 = weighted_tensor1.expand(x1.shape[0],x1.shape[1])
-    #     weighted_tensor2 = self.fc2(x2).expand(x1.shape[0],x1.shape[1])
-    #     weighted_tensor3 = self.fc3(x3).expand(x1.shape[0],x1.shape[1])
-    #     # print(f"weight2 shape:{weighted_tensor1.shape}")
-
-
-
-
-    #     # 对每个张量应用相应的权重进行逐元素相乘
-    #     result1 = x1 * weighted_tensor1
-    #     result2 = x2 * weighted_tensor2
-    #     result3 = x3 * weighted_tensor3
-
-    #     # 如果需要，可以将结果合并，例如逐元素求和
-    #     final_result = result1 + result2 + result3
-    #     return final_result
     def forward(self, x):
         # 通过不同模型得到输出
         x1 = self.model1(x)
@@ -323,16 +294,6 @@ class Tor_ensemble_model(nn.Module):
         # 将结果合并，逐元素求和
         final_result = result1 + result2 + result3
         return final_result
-
-
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 
 class DilatedBasicBlock1D(nn.Module):
     def __init__(self, filters1,filters2, layer, block, dilations):
@@ -523,38 +484,98 @@ class DFNet(nn.Module):
 
 
 class LLM(nn.Module):
-    def __init__(self, input_len=5000, num_classes=100, embed_dim=128, num_layers=4, num_heads=8):
-        super(LLM, self).__init__()
+    """
+    思路:
+      1) Embedding-like map: 将 -1/1 -> 0/1 -> embed (via small conv)
+      2) 多层 Conv1d 下采样（stride=2），把 seq_len 从 5000 降到 ~500
+      3) 用 MultiheadAttention 在降采样后做全局交互（batch_first=True）
+      4) Pooling + MLP 分类
+    适配输入: x shape = (batch, seq_len, 1)  (值为 -1 / 1)
+    输出: logits shape = (batch, num_classes)
+    """
+    def __init__(self, input_len=5000, num_classes=100,
+                 embed_dim=64, conv_channels=128,
+                 downsample_layers=3, attn_heads=8, attn_dropout=0.1):
+        super().__init__()
+        self.input_len = input_len
 
-        # 将 -1/1 映射为 embedding（相当于 vocab_size=2）
-        self.token_embedding = nn.Embedding(2, embed_dim)
-        self.position_embedding = nn.Parameter(torch.randn(1, input_len, embed_dim))
+        # 0) 将 -1/1 -> 0/1 做索引，然后 embed 为 embed_dim
+        # 用 Embedding 更方便（vocab=2）
+        self.embedding = nn.Embedding(2, embed_dim)
 
-        # Transformer 编码器
-        encoder_layer = nn.TransformerEncoderLayer(d_model=embed_dim, nhead=num_heads, batch_first=True)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        # 1) 初始 conv 将 embed_dim -> conv_channels
+        # Conv1d expects (B, C, L)
+        self.conv_in = nn.Conv1d(embed_dim, conv_channels, kernel_size=3, padding=1)
 
-        # 分类器头部
+        # 2) 下采样卷积块（每层 stride=2）
+        self.down_blocks = nn.ModuleList()
+        cur_channels = conv_channels
+        for i in range(downsample_layers):
+            # conv -> bn -> relu, stride=2 下采样
+            self.down_blocks.append(
+                nn.Sequential(
+                    nn.Conv1d(cur_channels, cur_channels, kernel_size=3, stride=2, padding=1, bias=False),
+                    nn.BatchNorm1d(cur_channels,eps=1e-5),
+                    nn.ReLU(inplace=True),
+                    # 1x conv to mix channels
+                    nn.Conv1d(cur_channels, cur_channels, kernel_size=3, padding=1, bias=False),
+                    nn.BatchNorm1d(cur_channels,eps=1e-5),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(0.01)
+                )
+            )
+            # optionally increase channels at next stage
+            # cur_channels *= 1  # keep same channels to save mem
+        self.post_conv_proj = nn.Linear(cur_channels, cur_channels)  # small projection for attention
+
+        # 3) Multi-head attention on downsampled sequence
+        # MultiheadAttention in PyTorch expects (batch_first=True) available newer versions
+        self.attn = nn.MultiheadAttention(embed_dim=cur_channels, num_heads=attn_heads,
+                                          dropout=attn_dropout, batch_first=True)
+
+        # 4) MLP head
         self.classifier = nn.Sequential(
-            nn.Linear(embed_dim, 256),
-            nn.ReLU(),
-            nn.Linear(256, num_classes)
+            nn.LayerNorm(cur_channels),
+            nn.Linear(cur_channels, cur_channels//2),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(cur_channels//2, num_classes)
         )
 
     def forward(self, x):
-        # 输入 x 是 [-1, 1] 的整数，将其转成 0/1 作为 embedding 的索引
-        
-        x = ((x + 1) // 2).long()  # -1 -> 0, 1 -> 1
+        """
+        x: (batch, seq_len, 1) with values -1 / 1
+        """
+        # squeeze last dim if present
+        if x.ndim == 3 and x.size(-1) == 1:
+            x = x.squeeze(-1)  # -> (batch, seq_len)
 
-        # 计算嵌入和位置编码
-        x = self.token_embedding(x) + self.position_embedding[:, :x.size(1), :]
+        # map -1/1 -> 0/1 indices for embedding
+        x = ((x + 1) // 2).long()  # -1 -> 0, 1 -> 1, shape (B, L)
 
-        # Transformer 编码
-        x = self.transformer(x)
+        emb = self.embedding(x)  # (B, L, embed_dim)
+        # to conv format
+        conv_in = emb.permute(0, 2, 1)  # (B, C_in, L)
 
-        # 使用 mean pooling
-        x = x.mean(dim=1)  # [batch_size, embed_dim]
+        # initial conv
+        out = self.conv_in(conv_in)  # (B, conv_channels, L)
 
-        # 分类
-        out = self.classifier(x)  # [batch_size, num_classes]
-        return out
+        # downsample blocks
+        for block in self.down_blocks:
+            out = block(out)  # stride=2 halves length each time
+
+        # out: (B, C, L_down)
+        out = out.permute(0, 2, 1)  # (B, L_down, C)
+
+        # optional small projection
+        out = self.post_conv_proj(out)  # (B, L_down, C)
+
+        # Attention (self-attn): query/key/value = out
+        # MultiheadAttention with batch_first expects (B, L, E)
+        attn_out, attn_weights = self.attn(out, out, out, need_weights=False)  # (B, L_down, C)
+
+        # Pooling: 可以用 mean or attention pooling; 用 mean + LayerNorm
+        pooled = attn_out.mean(dim=1)  # (B, C)
+
+        logits = self.classifier(pooled)  # (B, num_classes)
+        return logits
