@@ -248,9 +248,8 @@ def main(model_type,model_train):
         model = Tor_ensemble_model(model1,model2,model3).to(device)
         train_model(model,config[model_type],model_train=model_train)
     elif model_type == "llm":
-        model = LLM(input_len=5000, num_classes=100,
-                                         embed_dim=64, conv_channels=128,
-                                         downsample_layers=3, attn_heads=8).to(device)
+        # model = LLM(input_len=5000, num_classes=100,embed_dim=64, conv_channels=128,downsample_layers=3, attn_heads=8).to(device)
+        model = MultiScaleLLM(input_len=5000, downsample_layers=3, use_mamba=False).to(device)
         train_model(model,config[model_type],model_train=model_train)
     
 
@@ -270,3 +269,4 @@ if __name__ == "__main__":
 
     if(args.train_model):
         main(args.model,args.train_model)
+
