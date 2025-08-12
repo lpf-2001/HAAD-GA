@@ -25,6 +25,7 @@ from data import MyDataset
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 max_features = 1
+num_classes = 100
 
 
 def log_config(id):
@@ -71,7 +72,7 @@ def data_process(learn_param):
     test_ratio = learn_param.as_float('test_ratio')
     val_ratio = learn_param.as_float('val_ratio')
 
-    X_train, y_train, X_valid, y_valid, X_test, y_test=load_rimmer_dataset(input_size=5000,test_ratio=test_ratio,val_ratio=val_ratio)
+    X_train, y_train, X_valid, y_valid, X_test, y_test=load_rimmer_dataset(input_size=5000,num_classes=num_classes,test_ratio=test_ratio,val_ratio=val_ratio)
     print("X_train shape:",X_train.shape)
     print("X_valid shape:",X_valid.shape)
     print("X_test shape:",X_test.shape)
@@ -213,20 +214,21 @@ def main(model_type,model_train):
     
     torconf = "My_tor_5000.conf"
     config = ConfigObj(torconf)
+    
 
     if model_type == "cnn":
         model = Tor_cnn().to(device)
         train_model(model,config[model_type],model_train=model_train)
     elif model_type == "varcnn":
-        model = VarCNN(5000,100).to(device)
+        model = VarCNN(5000,num_classes).to(device)
         train_model(model,config[model_type],model_train=model_train)
     elif model_type == "df":
-        model = DFNet(100).to(device)
+        model = DFNet(num_classes).to(device)
         summary(model, input_size=(5000,1))
         # print(model)
         train_model(model,config[model_type],model_train=model_train)
     elif model_type == "lstm":
-        model = Tor_lstm(input_size=config[model_type]['model_param'].as_int('input_size'),hidden_size=config[model_type]['model_param'].as_int('hidden_size'),num_layers=config[model_type]['model_param'].as_int('num_layers'),num_classes=config[model_type]['model_param'].as_int('num_classes')).to(device)
+        model = Tor_lstm(input_size=config[model_type]['model_param'].as_int('input_size'),hidden_size=config[model_type]['model_param'].as_int('hidden_size'),num_layers=config[model_type]['model_param'].as_int('num_layers'),num_classes=num_classes).to(device)
         train_model(model,config[model_type],model_train=model_train)
     elif model_type == "sdae":
         learn_params = config[model_type]
@@ -237,7 +239,7 @@ def main(model_type,model_train):
                             ).to(device)
         train_model(model,config[model_type],model_train=model_train,train_loader=train_gen,val_loader=val_gen,test_loader=test_gen)
     elif model_type == "ensemble":
-        model1 = VarCNN(5000,100).to(device)
+        model1 = VarCNN(5000,num_classes).to(device)
         model2 = Tor_lstm(input_size=config["lstm"]['model_param'].as_int('input_size'),hidden_size=config["lstm"]['model_param'].as_int('hidden_size'),num_layers=config["lstm"]['model_param'].as_int('num_layers'),num_classes=config["lstm"]['model_param'].as_int('num_classes')).to(device)
         learn_params = config["sdae"]
         layers = [learn_params[str(x)] for x in range(1,learn_params.as_int('nb_layers')+1)]
@@ -248,9 +250,8 @@ def main(model_type,model_train):
         model = Tor_ensemble_model(model1,model2,model3).to(device)
         train_model(model,config[model_type],model_train=model_train)
     elif model_type == "llm":
-        model = LLM(input_len=5000, num_classes=100,
-                                         embed_dim=64, conv_channels=128,
-                                         downsample_layers=3, attn_heads=8).to(device)
+        # model = LLM(input_len=5000, num_classes=100,embed_dim=64, conv_channels=128,downsample_layers=3, attn_heads=8).to(device)
+        model = MultiScaleLLM(input_len=5000, num_classes=num_classes,downsample_layers=3, use_mamba=False).to(device)
         train_model(model,config[model_type],model_train=model_train)
     
 
@@ -270,3 +271,4 @@ if __name__ == "__main__":
 
     if(args.train_model):
         main(args.model,args.train_model)
+

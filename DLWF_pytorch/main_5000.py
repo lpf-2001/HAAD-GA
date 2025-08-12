@@ -25,7 +25,7 @@ from data import MyDataset
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 max_features = 1
-num_classes = 200
+num_classes = 100
 
 
 def log_config(id):
