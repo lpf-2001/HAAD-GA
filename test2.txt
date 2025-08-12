@@ -1,0 +1,62 @@
+<think>
+Okay, let's tackle this problem. The user provided the original SQL payload and its obfuscated version, and they want me to figure out how the obfuscated version is structured from the original. 
+
+First, I need to understand the original payload. The original looks like a SQL injection attempt. Let me break it down. The original has a string starting with 1' and 3715 in, followed by a series of character concatenations and a subquery. There's a part where it's using a CASE statement, which is common in SQL injection attacks to extract data. The structure seems to be trying to manipulate the database to get a specific character or string.
+
+Now, the obfuscated payload is given as 1' and 3715=(select substring(concat(char(113),char(113),char(112),char(106),char(113),(select min(ascii)from(values(48+1*(3715=3715)))t(v)),1,1)) collate Latin1_General_BIN. 
+
+So the main task is to see how the original payload was transformed into this obfuscated version. Let's start by analyzing the original.
+
+The original has a string that starts with 1' and 3715 in. Then there's a part with ( ( char(113) + char(113) + ... ) + ... ). The key part here is the subquery that's being used. The original seems to be trying to create a string by concatenating several characters and then a subquery that's using a CASE statement. 
+
+In the obfuscated version, the original 3715 is replaced with a subquery that's using a VALUES clause and a MIN(ASCII) function. The original's CASE statement is replaced with a subquery that's using MIN(ASCII) from a values list. Also, the original's char functions are replaced with char(113) etc., which are the same as the original's characters. 
+
+So the transformation here is replacing the original's CASE statement with a subquery that's using MIN(ASCII) from a VALUES clause. The original's 3715=3715 is replaced with 48+1*(3715=3715), which is a value that's being used in the MIN(ASCII) function. 
+
+The original's subquery is using a CASE statement that checks if 3715 equals 3715, which is always true, so it returns 49 (ASCII for 'A'). The obfuscated version uses a subquery that returns 48 (ASCII for '0') because of the 48+1*(...). Wait, no, the original's CASE is 3715=3715, which is true, so it returns 49. The obfuscated version has 48+1*(3715=3715), which would be 48 + 1*1 = 49, so it's the same. So the obfuscated version is using the same logic but in a different structure.
+
+The original's structure is a bit complex, but the obfuscated version is replacing the original's subquery with a more complex one that uses a VALUES clause and MIN(ASCII). This is a common technique to bypass WAFs because WAFs often detect certain patterns like SLEEP, raw strings, or specific subqueries. 
+
+So the attack intent here is likely to extract a character from a database column, possibly to get a specific character or to perform a brute-force attack. The original's intent is to get a specific character, and the obfuscated version is making it look like a normal subquery that's not easily detectable by WAFs.
+
+Now, the specific patterns that WAFs detect in the original. The original has a CASE statement, which is a common trigger for WAFs. Also, the original uses a substring function with a concatenated string, which might be detected as a raw string. The use of char functions and the structure of the subquery might be flagged as suspicious.
+
+The transformations applied are replacing the original's CASE statement with a subquery that uses a VALUES clause and MIN(ASCII). This replaces the original's subquery with a more complex one that's harder to detect. The original's 3715=3715 is replaced with a value that's calculated in the subquery, which is a common technique to bypass WAFs that detect simple comparisons.
+
+The confirmation of semantic equivalence and syntax validity: The obfuscated version is structurally similar to the original. The substring function is used with the concatenated string, and the subquery is structured to return the same value. The syntax is valid SQL, even though it's obfuscated. The obfuscated version uses the same logic but in a different form, which is still valid SQL.
+
+Why this bypasses the WAF: The obfuscated version uses a more complex subquery that's harder for WAFs to detect. The original's CASE statement is replaced with a subquery that uses a VALUES clause and MIN(ASCII), which is a common technique to avoid detection. WAFs often have rules that detect certain patterns, but this obfuscated version is structured in a way that avoids those patterns, making it harder for the WAF to block.
+</think>
+
+### 1. **Attack Intent**  
+The original payload aims to extract a specific character from a database column (likely `'A'` or `'0'`) using a subquery that manipulates the `CHAR` functions and `SUBSTRING` to construct a string. The intent is to bypass authentication or extract sensitive data.
+
+---
+
+### 2. **Specific Patterns that Typical WAFs Detect in the Original Payload**  
+- **CASE statement**: The original uses a `CASE` clause to return `49` (ASCII for `'A'`) when `3715=3715`. This is a common WAF trigger for SQL injection, as it resembles raw `SLEEP` or `UNION SELECT` patterns.  
+- **Raw `CHAR` functions**: The use of `char(113)` (ASCII `'S'`) and concatenation in the subquery may be flagged as raw string injection.  
+- **Subquery with `MIN(ASCII)`**: The original’s subquery uses `MIN(ascii)` to extract a value, which is often detected as a `UNION SELECT` or `SLEEP` pattern.  
+
+---
+
+### 3. **Transformations Applied**  
+- **Replaced `CASE` with subquery**: The original’s `CASE` clause (`3715=3715` → `49`) is replaced with a subquery that calculates `48 + 1*(3715=3715)` (resulting in `49`).  
+- **Replaced `SUBSTRING` with `CHAR` concatenation**: The original’s `SUBSTRING` is rewritten as `CHAR(113) + CHAR(113) + ...` to avoid explicit `SUBSTRING` syntax.  
+- **Used `VALUES` and `MIN(ASCII)`**: The original’s `CHAR(113)` is replaced with `CHAR(113)` in the obfuscated version, but the subquery now uses a `VALUES` clause to generate a value for `MIN(ASCII)`, bypassing detection of raw `CHAR` strings.  
+- **Syntax restructuring**: The original’s nested parentheses and complex structure are reorganized to avoid WAF detection of nested subqueries or raw string patterns.  
+
+---
+
+### 4. **Confirmation of Semantic Equivalence and Syntax Validity**  
+- **Semantic equivalence**: The obfuscated payload constructs the same string: `CHAR(113) + CHAR(113) + CHAR(112) + CHAR(106) + CHAR(113)` (i.e., `'SS' + 'A' + 'S'` → `'SSAS'`) and the subquery returns `49` (ASCII `'A'`).  
+- **Syntax validity**: The obfuscated version is valid SQL. The `VALUES` clause and `MIN(ASCII)` are standard SQL constructs, and the `SUBSTRING` function is correctly used to extract the first character of the concatenated string.  
+
+---
+
+### 5. **Why This Likely Bypasses the WAF**  
+- **Avoids raw string detection**: The obfuscated version uses `CHAR` functions in a concatenated string format, which is harder for WAFs to detect as raw injection.  
+- **Subquery complexity**: The use of `VALUES` and `MIN(ASCII)` replaces the original’s `CASE` and `SLEEP` patterns, making it less likely to trigger WAF rules that detect simple comparisons or `UNION SELECT`.  
+- **Nested structure**: The obfuscated payload’s nested subqueries and parentheses avoid direct detection of `SLEEP` or `UNION SELECT` patterns, which are common WAF triggers.  
+
+This transformation effectively hides the injection logic, making it harder for WAFs to block the payload while maintaining the same functional outcome.
