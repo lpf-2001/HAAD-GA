@@ -1,0 +1,14 @@
+epoch 0> loss:1.9433364868164062, accuracy:0.185715
+Validation Loss: 1.984721094999112, Validation Accuracy: 0.62738%
+epoch 0> loss:1.6990553140640259, accuracy:0.6257197696737045
+Validation Loss: 1.984721094999112, Validation Accuracy: 0.62738
+Accuracy: 0.626,Recall: 0.626,Precision: 0.630,F1-score: 0.621
+epoch 1> loss:0.8167352676391602, accuracy:0.6578525
+epoch 2> loss:0.46680378913879395, accuracy:0.794885
+epoch 3> loss:0.7275733947753906, accuracy:0.8390525
+epoch 4> loss:0.6669437289237976, accuracy:0.8632475
+epoch 5> loss:0.4563956558704376, accuracy:0.880285
+Validation Loss: 0.6223088868405677, Validation Accuracy: 0.83142%
+epoch 5> loss:1.1644437313079834, accuracy:0.8274952015355086
+Validation Loss: 0.6223088868405677, Validation Accuracy: 0.83142
+Accuracy: 0.827,Recall: 0.827,Precision: 0.831,F1-score: 0.825

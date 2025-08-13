@@ -145,9 +145,9 @@ def load_rimmer_dataset(input_size=5000, num_classes=100, formatting=True,test_r
     print("-----------")
     # Convert website to integer
 
-    y, websites = np.unique(labels,return_inverse=True)
+    websites, y = np.unique(labels,return_inverse=True)
     
-
+    # print(y)
     # Split data to fixed parts
     X_train, y_train, X_valid, y_valid, X_test, y_test = train_test_valid_split(data, y, valid_size=val_ratio, test_size=test_ratio)
     # with open(dataset_dir + 'tor_%dw_2500tr_test.npz' % num_classes, 'wb') as handle:
