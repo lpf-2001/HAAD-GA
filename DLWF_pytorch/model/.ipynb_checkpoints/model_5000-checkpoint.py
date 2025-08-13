@@ -579,3 +579,141 @@ class LLM(nn.Module):
 
         logits = self.classifier(pooled)  # (B, num_classes)
         return logits
+    
+    
+    
+
+
+class MultiScaleLLM(nn.Module):
+    """
+    Multi-scale variant of your LLM:
+      - keep embeddings for {-1, +1}
+      - initial conv -> multiple downsample stages
+      - collect multi-scale features (after each down block)
+      - align spatial length (adaptive pooling) to the smallest scale and fuse
+      - project fused multiscale feature to attn dim and apply attention or Mamba
+      - pooling + MLP head
+
+    参数要点：
+      - scales: number of downsample stages to keep (>=1)
+      - fuse_mode: 'concat' or 'sum' (默认 concat)
+      - use_mamba: if True, will use MambaPlaceholder (replace with real Mamba)
+    """
+
+    def __init__(self,
+                 input_len: int = 5000,
+                 num_classes: int = 100,
+                 embed_dim: int = 512,
+                 conv_channels: int = 256,
+                 downsample_layers: int = 3,
+                 attn_heads: int = 8,
+                 attn_dropout: float = 0.1,
+                 fuse_mode: str = 'concat',
+                 use_mamba: bool = False):
+        super().__init__()
+        assert fuse_mode in ('concat', 'sum')
+
+        self.input_len = input_len
+        self.embed = nn.Embedding(2, embed_dim)
+        self.conv_in = nn.Conv1d(embed_dim, conv_channels, kernel_size=3, padding=1)
+
+        # downsample blocks and we will keep the output feature of each block
+        self.down_blocks = nn.ModuleList()
+        cur_channels = conv_channels
+        for i in range(downsample_layers):
+            self.down_blocks.append(
+                nn.Sequential(
+                    nn.Conv1d(cur_channels, cur_channels, kernel_size=3, stride=2, padding=1, bias=False),
+                    nn.BatchNorm1d(cur_channels, eps=1e-5),
+                    nn.ReLU(inplace=True),
+                    nn.Conv1d(cur_channels, cur_channels, kernel_size=3, padding=1, bias=False),
+                    nn.BatchNorm1d(cur_channels, eps=1e-5),
+                    nn.ReLU(inplace=True),
+                    nn.Dropout(0.01)
+                )
+            )
+            # keep channels constant to save memory
+
+        # After fusion we'll project to attn_dim
+        self.fuse_mode = fuse_mode
+        if fuse_mode == 'concat':
+            fused_channels = cur_channels * downsample_layers
+        else:
+            fused_channels = cur_channels
+
+        self.fuse_proj = nn.Linear(fused_channels, cur_channels)
+
+        # Attention (or Mamba placeholder)
+        self.attn = nn.MultiheadAttention(embed_dim=cur_channels, num_heads=attn_heads, dropout=attn_dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(cur_channels)
+        # 前馈网络
+        self.ffn = nn.Sequential(
+            nn.Linear(cur_channels, cur_channels*2),
+            nn.GELU(),
+            nn.Linear(cur_channels*2, cur_channels)
+        )
+        # 第二层归一化
+        self.norm2 = nn.LayerNorm(cur_channels)
+        # Dropout
+        self.dropout = nn.Dropout(0.1)
+        
+
+        # classification head
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(cur_channels),
+            nn.Linear(cur_channels, max(cur_channels // 2, 1)),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.1),
+            nn.Linear(max(cur_channels // 2, 1), num_classes)
+        )
+
+    def forward(self, x: torch.Tensor):
+        # x: (B, L, 1) with values -1 / 1
+        if x.ndim == 3 and x.size(-1) == 1:
+            x = x.squeeze(-1)  # (B, L)
+        x = ((x + 1) // 2).long()
+        emb = self.embed(x)  # (B, L, E)
+        out = emb.permute(0, 2, 1)  # (B, C, L)
+
+        out = self.conv_in(out)
+
+        features: List[torch.Tensor] = []
+        for block in self.down_blocks:
+            out = block(out)  # (B, C, L_i)
+            features.append(out)
+
+        # features: list of tensors with shapes [(B,C,L1), (B,C,L2), ...]
+        # align them to the smallest spatial length (last one)
+        target_len = features[-1].size(-1)
+        aligned = []
+        for f in features:
+            if f.size(-1) == target_len:
+                aligned.append(f)
+            else:
+                # use adaptive avg pool to align length
+                aligned.append(F.adaptive_avg_pool1d(f, output_size=target_len))
+
+        # fuse along channel dim
+        if self.fuse_mode == 'concat':
+            fused = torch.cat(aligned, dim=1)  # (B, C*scales, L_target)
+        else:
+            # sum
+            fused = torch.stack(aligned, dim=0).sum(dim=0)  # (B, C, L_target)
+
+        # move to (B, L, C)
+        fused = fused.permute(0, 2, 1)
+
+        # project fused channels to attn channels
+        fused = self.fuse_proj(fused)  # (B, L, C)
+        # print("fused.shape",fused.shape)
+ 
+        for i in range(0,3):
+            attn_out, _ = self.attn(fused, fused, fused, need_weights=False)
+            out1 = self.norm1(self.dropout(attn_out)+fused)
+            ffn_out = self.ffn(out1)
+            fused = self.norm2(self.dropout(ffn_out)+out1)
+        
+        # global pooling
+        pooled = fused.mean(dim=1)
+        logits = self.classifier(pooled)
+        return logits

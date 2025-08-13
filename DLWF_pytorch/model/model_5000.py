@@ -583,23 +583,6 @@ class LLM(nn.Module):
     
     
 
-class MambaPlaceholder(nn.Module):
-    """占位符：如果你之后想替换为真正的 Mamba/SSM 实现，把这里换成真实模块。
-    要求输入 (B, L, C) -> 输出 (B, L, C)，支持 carry-state 接口可选。
-    """
-    def __init__(self, dim: int):
-        super().__init__()
-        self.dim = dim
-        # 用一个轻量的因果卷积近似表现长程感受野（仅作占位）
-        self.conv = nn.Conv1d(dim, dim, kernel_size=31, padding=30, groups=1)
-
-    def forward(self, x, carry=None):
-        # x: (B, L, C) -> conv expect (B, C, L)
-        y = x.permute(0, 2, 1)
-        y = self.conv(y)
-        y = y.permute(0, 2, 1)
-        return y, None
-
 
 class MultiScaleLLM(nn.Module):
     """
@@ -620,8 +603,8 @@ class MultiScaleLLM(nn.Module):
     def __init__(self,
                  input_len: int = 5000,
                  num_classes: int = 100,
-                 embed_dim: int = 256,
-                 conv_channels: int = 128,
+                 embed_dim: int = 512,
+                 conv_channels: int = 256,
                  downsample_layers: int = 3,
                  attn_heads: int = 8,
                  attn_dropout: float = 0.1,
@@ -661,14 +644,19 @@ class MultiScaleLLM(nn.Module):
         self.fuse_proj = nn.Linear(fused_channels, cur_channels)
 
         # Attention (or Mamba placeholder)
-        self.use_mamba = use_mamba
-        if use_mamba:
-            self.mamba = MambaPlaceholder(cur_channels)
-            # keep a small projection for residual
-            self.post_proj = nn.Linear(cur_channels, cur_channels)
-        else:
-            self.attn = nn.MultiheadAttention(embed_dim=cur_channels, num_heads=attn_heads,
-                                              dropout=attn_dropout, batch_first=True)
+        self.attn = nn.MultiheadAttention(embed_dim=cur_channels, num_heads=attn_heads, dropout=attn_dropout, batch_first=True)
+        self.norm1 = nn.LayerNorm(cur_channels)
+        # 前馈网络
+        self.ffn = nn.Sequential(
+            nn.Linear(cur_channels, cur_channels*2),
+            nn.GELU(),
+            nn.Linear(cur_channels*2, cur_channels)
+        )
+        # 第二层归一化
+        self.norm2 = nn.LayerNorm(cur_channels)
+        # Dropout
+        self.dropout = nn.Dropout(0.1)
+        
 
         # classification head
         self.classifier = nn.Sequential(
@@ -717,17 +705,15 @@ class MultiScaleLLM(nn.Module):
 
         # project fused channels to attn channels
         fused = self.fuse_proj(fused)  # (B, L, C)
-
-        # apply attention or mamba
-        if self.use_mamba:
-            m_out, _ = self.mamba(fused)  # placeholder mamba: returns (B,L,C)
-            m_out = self.post_proj(m_out)
-            out = fused + m_out
-        else:
+        # print("fused.shape",fused.shape)
+ 
+        for i in range(0,3):
             attn_out, _ = self.attn(fused, fused, fused, need_weights=False)
-            out = fused + attn_out  # residual
-
+            out1 = self.norm1(self.dropout(attn_out)+fused)
+            ffn_out = self.ffn(out1)
+            fused = self.norm2(self.dropout(ffn_out)+out1)
+        
         # global pooling
-        pooled = out.mean(dim=1)
+        pooled = fused.mean(dim=1)
         logits = self.classifier(pooled)
         return logits
