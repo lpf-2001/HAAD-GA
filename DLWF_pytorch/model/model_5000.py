@@ -481,106 +481,6 @@ class DFNet(nn.Module):
         x = self.fc3(x)
         return x
 
-
-
-class LLM(nn.Module):
-    """
-    思路:
-      1) Embedding-like map: 将 -1/1 -> 0/1 -> embed (via small conv)
-      2) 多层 Conv1d 下采样（stride=2），把 seq_len 从 5000 降到 ~500
-      3) 用 MultiheadAttention 在降采样后做全局交互（batch_first=True）
-      4) Pooling + MLP 分类
-    适配输入: x shape = (batch, seq_len, 1)  (值为 -1 / 1)
-    输出: logits shape = (batch, num_classes)
-    """
-    def __init__(self, input_len=5000, num_classes=100,
-                 embed_dim=64, conv_channels=128,
-                 downsample_layers=3, attn_heads=8, attn_dropout=0.1):
-        super().__init__()
-        self.input_len = input_len
-
-        # 0) 将 -1/1 -> 0/1 做索引，然后 embed 为 embed_dim
-        # 用 Embedding 更方便（vocab=2）
-        self.embedding = nn.Embedding(2, embed_dim)
-
-        # 1) 初始 conv 将 embed_dim -> conv_channels
-        # Conv1d expects (B, C, L)
-        self.conv_in = nn.Conv1d(embed_dim, conv_channels, kernel_size=3, padding=1)
-
-        # 2) 下采样卷积块（每层 stride=2）
-        self.down_blocks = nn.ModuleList()
-        cur_channels = conv_channels
-        for i in range(downsample_layers):
-            # conv -> bn -> relu, stride=2 下采样
-            self.down_blocks.append(
-                nn.Sequential(
-                    nn.Conv1d(cur_channels, cur_channels, kernel_size=3, stride=2, padding=1, bias=False),
-                    nn.BatchNorm1d(cur_channels,eps=1e-5),
-                    nn.ReLU(inplace=True),
-                    # 1x conv to mix channels
-                    nn.Conv1d(cur_channels, cur_channels, kernel_size=3, padding=1, bias=False),
-                    nn.BatchNorm1d(cur_channels,eps=1e-5),
-                    nn.ReLU(inplace=True),
-                    nn.Dropout(0.01)
-                )
-            )
-            # optionally increase channels at next stage
-            # cur_channels *= 1  # keep same channels to save mem
-        self.post_conv_proj = nn.Linear(cur_channels, cur_channels)  # small projection for attention
-
-        # 3) Multi-head attention on downsampled sequence
-        # MultiheadAttention in PyTorch expects (batch_first=True) available newer versions
-        self.attn = nn.MultiheadAttention(embed_dim=cur_channels, num_heads=attn_heads,
-                                          dropout=attn_dropout, batch_first=True)
-
-        # 4) MLP head
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(cur_channels),
-            nn.Linear(cur_channels, cur_channels//2),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.1),
-            nn.Linear(cur_channels//2, num_classes)
-        )
-
-    def forward(self, x):
-        """
-        x: (batch, seq_len, 1) with values -1 / 1
-        """
-        # squeeze last dim if present
-        if x.ndim == 3 and x.size(-1) == 1:
-            x = x.squeeze(-1)  # -> (batch, seq_len)
-
-        # map -1/1 -> 0/1 indices for embedding
-        x = ((x + 1) // 2).long()  # -1 -> 0, 1 -> 1, shape (B, L)
-
-        emb = self.embedding(x)  # (B, L, embed_dim)
-        # to conv format
-        conv_in = emb.permute(0, 2, 1)  # (B, C_in, L)
-
-        # initial conv
-        out = self.conv_in(conv_in)  # (B, conv_channels, L)
-
-        # downsample blocks
-        for block in self.down_blocks:
-            out = block(out)  # stride=2 halves length each time
-
-        # out: (B, C, L_down)
-        out = out.permute(0, 2, 1)  # (B, L_down, C)
-
-        # optional small projection
-        out = self.post_conv_proj(out)  # (B, L_down, C)
-
-        # Attention (self-attn): query/key/value = out
-        # MultiheadAttention with batch_first expects (B, L, E)
-        attn_out, attn_weights = self.attn(out, out, out, need_weights=False)  # (B, L_down, C)
-
-        # Pooling: 可以用 mean or attention pooling; 用 mean + LayerNorm
-        pooled = attn_out.mean(dim=1)  # (B, C)
-
-        logits = self.classifier(pooled)  # (B, num_classes)
-        return logits
-    
-    
     
 
 
@@ -604,7 +504,7 @@ class MultiScaleLLM(nn.Module):
                  input_len: int = 5000,
                  num_classes: int = 100,
                  embed_dim: int = 512,
-                 conv_channels: int = 256,
+                 conv_channels: int = 128,
                  downsample_layers: int = 3,
                  attn_heads: int = 8,
                  attn_dropout: float = 0.1,
@@ -618,10 +518,6 @@ class MultiScaleLLM(nn.Module):
         self.conv_in = nn.Conv1d(embed_dim, conv_channels, kernel_size=3, padding=1)
         # 独立的层
         
-        
-        
-        
-
         # downsample blocks and we will keep the output feature of each block
         self.down_blocks = nn.ModuleList()
         cur_channels = conv_channels
@@ -634,7 +530,7 @@ class MultiScaleLLM(nn.Module):
                     nn.Conv1d(cur_channels, cur_channels, kernel_size=3, padding=1, bias=False),
                     nn.BatchNorm1d(cur_channels, eps=1e-5),
                     nn.ReLU(inplace=True),
-                    nn.Dropout(0.01)
+                    nn.Dropout(0.1)
                 )
             )
             # keep channels constant to save memory
@@ -659,7 +555,7 @@ class MultiScaleLLM(nn.Module):
                     nn.GELU(),
                     nn.Linear(cur_channels*2, cur_channels)
                 ),
-                "dropout": nn.Dropout(0.1)
+                "dropout": nn.Dropout(0.3)
             })
             for _ in range(3)  # 三层
         ])

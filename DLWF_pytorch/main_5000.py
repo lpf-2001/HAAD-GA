@@ -25,7 +25,7 @@ from data import MyDataset
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 max_features = 1
-num_classes = 200
+num_classes = 100
 
 
 def log_config(id):
@@ -88,125 +88,214 @@ def data_process(learn_param):
 
 
 
-def train_model(model,learn_param,model_train=True,train_loader=None,val_loader=None,test_loader=None):
+# def train_model(model,learn_param,model_train=True,train_loader=None,val_loader=None,test_loader=None):
     
-    # 基础参数设置
-    maxlen = learn_param.as_int('maxlen')
-    epochs = learn_param.as_int('nb_epochs')
-    batch_size = learn_param.as_int('batch_size')
-    model_type = learn_param['model_type']
+#     # 基础参数设置
+#     maxlen = learn_param.as_int('maxlen')
+#     epochs = learn_param.as_int('nb_epochs')
+#     batch_size = learn_param.as_int('batch_size')
+#     model_type = learn_param['model_type']
     
-    # 优化器参数设置
-    optimizer = learn_param['optimizer']
+#     # 优化器参数设置
+#     optimizer = learn_param['optimizer']
     
-    #加载数据
-    train_loader, val_loader, test_loader = data_process(learn_param)
+#     #加载数据
+#     train_loader, val_loader, test_loader = data_process(learn_param)
 
-    if optimizer == "rmsprop":
-        optimizer = optim.RMSprop(model.parameters(),
-                                lr = learn_param[optimizer].as_float('learning_rate'))
-    elif optimizer == "adamax":
-        optimizer = optim.Adamax(model.parameters(),
-                                lr = learn_param[optimizer].as_float('learning_rate'))
-    elif optimizer == "sgd":
-        optimizer = optim.SGD(model.parameters(),
-                            lr = learn_param[optimizer].as_float('learning_rate'),
-                            momentum = learn_param[optimizer].as_float('momentum'),
-                            weight_decay = learn_param[optimizer].as_float('decay'))
-    criterion = nn.CrossEntropyLoss()
+#     if optimizer == "rmsprop":
+#         optimizer = optim.RMSprop(model.parameters(),
+#                                 lr = learn_param[optimizer].as_float('learning_rate'))
+#     elif optimizer == "adamax":
+#         optimizer = optim.Adamax(model.parameters(),
+#                                 lr = learn_param[optimizer].as_float('learning_rate'))
+#     elif optimizer == "sgd":
+#         optimizer = optim.SGD(model.parameters(),
+#                             lr = learn_param[optimizer].as_float('learning_rate'),
+#                             momentum = learn_param[optimizer].as_float('momentum'),
+#                             weight_decay = learn_param[optimizer].as_float('decay'))
+#     criterion = nn.CrossEntropyLoss()
     
-    best_f1 = 0
-    for epoch in range(epochs):
-        model.train()
-        count = 0
-        accuracy = 0        
-        with tqdm(train_loader, unit="batch") as tepoch:
-            for batch_x, batch_y in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}"):
-                # print(f"batch_x shape:{batch_x.shape}") 
-                tepoch.set_description(f"Epoch {epoch+1}")
-                count = count + batch_y.size(0)
-                optimizer.zero_grad()
+#     best_f1 = 0
+#     for epoch in range(epochs):
+#         model.train()
+#         count = 0
+#         accuracy = 0        
+#         with tqdm(train_loader, unit="batch") as tepoch:
+#             for batch_x, batch_y in tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}"):
+#                 # print(f"batch_x shape:{batch_x.shape}") 
+#                 tepoch.set_description(f"Epoch {epoch+1}")
+#                 count = count + batch_y.size(0)
+#                 optimizer.zero_grad()
 
-                batch_x_tensor, batch_y_tensor = batch_x.float().to(device), batch_y.float().to(device)
-                with autocast():
-                    outputs = model(batch_x_tensor)
-                    loss = criterion(outputs,batch_y_tensor.argmax(1))
-                batch_accuracy= (outputs.argmax(1) == batch_y_tensor.argmax(1)).sum().item()/batch_y_tensor.shape[0]
-                accuracy = accuracy + (outputs.argmax(1) == batch_y_tensor.argmax(1)).sum().item()
-                loss.backward()
-                optimizer.step()
-                tepoch.set_postfix(loss=loss, accuracy=batch_accuracy)
-            log(None,"epoch {}> loss:{}, accuracy:{}\n".format(epoch,loss, accuracy/count),model_type)
+#                 batch_x_tensor, batch_y_tensor = batch_x.float().to(device), batch_y.float().to(device)
+#                 with autocast():
+#                     outputs = model(batch_x_tensor)
+#                     loss = criterion(outputs,batch_y_tensor.argmax(1))
+#                 batch_accuracy= (outputs.argmax(1) == batch_y_tensor.argmax(1)).sum().item()/batch_y_tensor.shape[0]
+#                 accuracy = accuracy + (outputs.argmax(1) == batch_y_tensor.argmax(1)).sum().item()
+#                 loss.backward()
+#                 optimizer.step()
+#                 tepoch.set_postfix(loss=loss, accuracy=batch_accuracy)
+#             log(None,"epoch {}> loss:{}, accuracy:{}\n".format(epoch,loss, accuracy/count),model_type)
 
-        if epoch%5==0:
-            #验证模型
-            model.eval()
-            val_loss = 0.0
-            val_correct = 0
-            val_total = 0
-            with torch.no_grad():
-                for inputs, labels in tqdm(val_loader,desc="validation"):
-                    # print(f"inputs shape:{inputs.shape}")
-                    if torch.cuda.is_available():
-                        inputs, labels = inputs.float().to(device), labels.float().to(device)
-                        outputs = model(inputs)
-                    loss = criterion(outputs, labels.argmax(1))
-                    val_loss += loss.item()
-                    val_total += labels.size(0)
-                    val_correct += (outputs.argmax(1) == labels.argmax(1)).sum().item()
-                val_accuracy = val_correct / val_total
-                print(f"Validation Loss: {val_loss / len(val_loader)}, Validation Accuracy: {val_accuracy}%")
-                log(None,f"Validation Loss: {val_loss / len(val_loader)}, Validation Accuracy: {val_accuracy}%\n",model_type)
+#         if epoch%5==0:
+#             #验证模型
+#             model.eval()
+#             val_loss = 0.0
+#             val_correct = 0
+#             val_total = 0
+#             with torch.no_grad():
+#                 for inputs, labels in tqdm(val_loader,desc="validation"):
+#                     # print(f"inputs shape:{inputs.shape}")
+#                     if torch.cuda.is_available():
+#                         inputs, labels = inputs.float().to(device), labels.float().to(device)
+#                         outputs = model(inputs)
+#                     loss = criterion(outputs, labels.argmax(1))
+#                     val_loss += loss.item()
+#                     val_total += labels.size(0)
+#                     val_correct += (outputs.argmax(1) == labels.argmax(1)).sum().item()
+#                 val_accuracy = val_correct / val_total
+#                 print(f"Validation Loss: {val_loss / len(val_loader)}, Validation Accuracy: {val_accuracy}%")
+#                 log(None,f"Validation Loss: {val_loss / len(val_loader)}, Validation Accuracy: {val_accuracy}%\n",model_type)
             
-            
-            
-            count = 0
-            recall = 0
-            f1 = 0
-            precision = 0
-            accuracy = 0
-            with torch.no_grad():
-                for inputs, labels in tqdm(test_loader):
-                    inputs, labels = inputs.float(), labels.float()
-                    inputs, labels = inputs.to(device), labels.to(device)
-                    outputs = model(inputs).argmax(1).detach().cpu().numpy()       
-                    labels = labels.argmax(1).detach().cpu().numpy()
-                    count = count+1
-                    # 1. 准确率 (Accuracy)
-                    accuracy += accuracy_score(labels, outputs)
+#             count = 0
+#             recall = 0
+#             f1 = 0
+#             precision = 0
+#             accuracy = 0
+#             with torch.no_grad():
+#                 for inputs, labels in tqdm(test_loader):
+#                     inputs, labels = inputs.float(), labels.float()
+#                     inputs, labels = inputs.to(device), labels.to(device)
+#                     outputs = model(inputs).argmax(1).detach().cpu().numpy()       
+#                     labels = labels.argmax(1).detach().cpu().numpy()
+#                     count = count+1
+#                     # 1. 准确率 (Accuracy)
+#                     accuracy += accuracy_score(labels, outputs)
                     
-                    # 2. 召回率 (Recall)
-                    recall += recall_score(labels, outputs, average='weighted')
+#                     # 2. 召回率 (Recall)
+#                     recall += recall_score(labels, outputs, average='weighted')
                     
-                    # 3. 精确率 (Precision)
-                    precision += precision_score(labels, outputs, average='weighted')
+#                     # 3. 精确率 (Precision)
+#                     precision += precision_score(labels, outputs, average='weighted')
 
-                    # 4. F1-score
-                    f1 += f1_score(labels, outputs, average='weighted')
-            log(None,"epoch {}> loss:{}, accuracy:{}\n".format(epoch,loss, accuracy/count),model_type) 
-            log(None,f"Validation Loss: {val_loss / len(val_loader)}, Validation Accuracy: {val_accuracy}\n",model_type)
-            log(None,f"Accuracy: {accuracy/count:.3f},Recall: {recall/count:.3f},Precision: {precision/count:.3f},F1-score: {f1/count:.3f}\n",model_type)
-            if f1 > best_f1:
-                if model_type == "CNN": 
-                    torch.save(model.state_dict(),"./trained_model/length_5000/cnn_5000.pth")    
-                elif model_type == "LSTM":
-                    torch.save(model.state_dict(),"./trained_model/length_5000/lstm_5000.pth")
-                elif model_type == "SDAE":
-                    torch.save(model.state_dict(),"./trained_model/length_5000/sdae_5000.pth")
-                elif model_type == "ENSEMBLE":
-                    torch.save(model.state_dict(),"./trained_model/length_5000/ensemble_5000.pth")
-                elif model_type == "DF":
-                    torch.save(model.state_dict(),"./trained_model/length_5000/df_5000.pth") 
-                elif model_type == "VARCNN":
-                    torch.save(model.state_dict(),"./trained_model/length_5000/varcnn_5000.pth")
-                elif model_type == "LLM":
-                    torch.save(model.state_dict(),"./trained_model/length_5000/llm_5000.pth")
-                best_f1 = f1
+#                     # 4. F1-score
+#                     f1 += f1_score(labels, outputs, average='weighted')
+#             log(None,"epoch {}> loss:{}, accuracy:{}\n".format(epoch,loss, accuracy/count),model_type) 
+#             log(None,f"Validation Loss: {val_loss / len(val_loader)}, Validation Accuracy: {val_accuracy}\n",model_type)
+#             log(None,f"Accuracy: {accuracy/count:.3f},Recall: {recall/count:.3f},Precision: {precision/count:.3f},F1-score: {f1/count:.3f}\n",model_type)
+#             if f1 > best_f1:
+#                 if model_type == "CNN": 
+#                     torch.save(model.state_dict(),"./trained_model/length_5000/cnn_5000.pth")    
+#                 elif model_type == "LSTM":
+#                     torch.save(model.state_dict(),"./trained_model/length_5000/lstm_5000.pth")
+#                 elif model_type == "SDAE":
+#                     torch.save(model.state_dict(),"./trained_model/length_5000/sdae_5000.pth")
+#                 elif model_type == "ENSEMBLE":
+#                     torch.save(model.state_dict(),"./trained_model/length_5000/ensemble_5000.pth")
+#                 elif model_type == "DF":
+#                     torch.save(model.state_dict(),"./trained_model/length_5000/df_5000.pth") 
+#                 elif model_type == "VARCNN":
+#                     torch.save(model.state_dict(),"./trained_model/length_5000/varcnn_5000.pth")
+#                 elif model_type == "LLM":
+#                     torch.save(model.state_dict(),"./trained_model/length_5000/llm_5000.pth")
+#                 best_f1 = f1
           
 
-    
 
+def evaluate(model, loader, criterion, device, calc_metrics=False):
+    model.eval()
+    total_loss, correct, total = 0.0, 0, 0
+    metrics_sum = {"accuracy": 0, "recall": 0, "precision": 0, "f1": 0}
+    with torch.no_grad():
+        for inputs, labels in tqdm(loader, desc="Evaluating", leave=False):
+            inputs, labels = inputs.float().to(device), labels.float().to(device)
+            outputs = model(inputs)
+            total_loss += criterion(outputs, labels.argmax(1)).item()
+            preds = outputs.argmax(1)
+            correct += (preds == labels.argmax(1)).sum().item()
+            total += labels.size(0)
 
+            if calc_metrics:
+                y_true, y_pred = labels.argmax(1).cpu().numpy(), preds.cpu().numpy()
+                metrics_sum["accuracy"] += accuracy_score(y_true, y_pred)
+                metrics_sum["recall"] += recall_score(y_true, y_pred, average='weighted')
+                metrics_sum["precision"] += precision_score(y_true, y_pred, average='weighted')
+                metrics_sum["f1"] += f1_score(y_true, y_pred, average='weighted')
+
+    avg_loss = total_loss / len(loader)
+    avg_acc = correct / total
+    if calc_metrics:
+        count = len(loader)
+        for k in metrics_sum:
+            metrics_sum[k] /= count
+        return avg_loss, avg_acc, metrics_sum
+    return avg_loss, avg_acc
+
+def train_model(model, learn_param, model_train=True):
+    # 参数
+    epochs = learn_param.as_int('nb_epochs')
+    model_type = learn_param['model_type']
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 数据
+    train_loader, val_loader, test_loader = data_process(learn_param)
+
+    # 优化器
+    opt_config = learn_param[learn_param['optimizer']]
+    optimizers = {
+        "rmsprop": optim.RMSprop,
+        "adamax": optim.Adamax,
+        "sgd": optim.SGD
+    }
+    opt_kwargs = {k: opt_config.as_float(k) for k in opt_config if k != 'optimizer'}
+    optimizer = optimizers[learn_param['optimizer']](model.parameters(), **opt_kwargs)
+
+    criterion = nn.CrossEntropyLoss()
+    best_f1 = 0
+    save_paths = {
+        "CNN": "./trained_model/length_5000/cnn_5000.pth",
+        "LSTM": "./trained_model/length_5000/lstm_5000.pth",
+        "SDAE": "./trained_model/length_5000/sdae_5000.pth",
+        "ENSEMBLE": "./trained_model/length_5000/ensemble_5000.pth",
+        "DF": "./trained_model/length_5000/df_5000.pth",
+        "VARCNN": "./trained_model/length_5000/varcnn_5000.pth",
+        "LLM": "./trained_model/length_5000/llm_5000.pth"
+    }
+
+    for epoch in range(epochs):
+        model.train()
+        total_correct, total_samples = 0, 0
+        with tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}") as tepoch:
+            for batch_x, batch_y in tepoch:
+                optimizer.zero_grad()
+                batch_x, batch_y = batch_x.float().to(device), batch_y.float().to(device)
+                with autocast():
+                    outputs = model(batch_x)
+                    loss = criterion(outputs, batch_y.argmax(1))
+                loss.backward()
+                optimizer.step()
+
+                preds = outputs.argmax(1)
+                total_correct += (preds == batch_y.argmax(1)).sum().item()
+                total_samples += batch_y.size(0)
+                tepoch.set_postfix(loss=loss.item(), accuracy=total_correct/total_samples)
+
+        log(None, f"Epoch {epoch} > loss: {loss.item()}, accuracy: {total_correct/total_samples:.4f}\n", model_type)
+
+        # 验证 & 测试
+        if epoch % 5 == 0:
+            val_loss, val_acc = evaluate(model, val_loader, criterion, device)
+            log(None, f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.4f}\n", model_type)
+
+            _, _, metrics = evaluate(model, test_loader, criterion, device, calc_metrics=True)
+            log(None, f"Accuracy: {metrics['accuracy']:.3f}, Recall: {metrics['recall']:.3f}, "
+                      f"Precision: {metrics['precision']:.3f}, F1-score: {metrics['f1']:.3f}\n", model_type)
+
+            # 保存最优
+            if metrics["f1"] > best_f1:
+                torch.save(model.state_dict(), save_paths[model_type])
+                best_f1 = metrics["f1"]
 
 
 
