@@ -616,6 +616,11 @@ class MultiScaleLLM(nn.Module):
         self.input_len = input_len
         self.embed = nn.Embedding(2, embed_dim)
         self.conv_in = nn.Conv1d(embed_dim, conv_channels, kernel_size=3, padding=1)
+        # 独立的层
+        
+        
+        
+        
 
         # downsample blocks and we will keep the output feature of each block
         self.down_blocks = nn.ModuleList()
@@ -642,18 +647,24 @@ class MultiScaleLLM(nn.Module):
             fused_channels = cur_channels
 
         self.fuse_proj = nn.Linear(fused_channels, cur_channels)
-
-        # Attention (or Mamba placeholder)
-        self.attn = nn.MultiheadAttention(embed_dim=cur_channels, num_heads=attn_heads, dropout=attn_dropout, batch_first=True)
-        self.norm1 = nn.LayerNorm(cur_channels)
-        # 前馈网络
-        self.ffn = nn.Sequential(
-            nn.Linear(cur_channels, cur_channels*2),
-            nn.GELU(),
-            nn.Linear(cur_channels*2, cur_channels)
-        )
-        # 第二层归一化
-        self.norm2 = nn.LayerNorm(cur_channels)
+        
+        self.layers = nn.ModuleList([
+            nn.ModuleDict({
+                "norm1": nn.LayerNorm(cur_channels),
+                "attn": nn.MultiheadAttention(embed_dim=cur_channels, num_heads=attn_heads,
+                                              dropout=attn_dropout, batch_first=True),
+                "norm2": nn.LayerNorm(cur_channels),
+                "ffn": nn.Sequential(
+                    nn.Linear(cur_channels, cur_channels*2),
+                    nn.GELU(),
+                    nn.Linear(cur_channels*2, cur_channels)
+                ),
+                "dropout": nn.Dropout(0.1)
+            })
+            for _ in range(3)  # 三层
+        ])
+        
+    
         # Dropout
         self.dropout = nn.Dropout(0.1)
         
@@ -707,11 +718,16 @@ class MultiScaleLLM(nn.Module):
         fused = self.fuse_proj(fused)  # (B, L, C)
         # print("fused.shape",fused.shape)
  
-        for i in range(0,3):
-            attn_out, _ = self.attn(fused, fused, fused, need_weights=False)
-            out1 = self.norm1(self.dropout(attn_out)+fused)
-            ffn_out = self.ffn(out1)
-            fused = self.norm2(self.dropout(ffn_out)+out1)
+        for layer in self.layers:
+            #   norm + attention
+            normed = layer["norm1"](fused)
+            attn_out, _ = layer["attn"](normed, normed, normed, need_weights=False)
+            fused = fused+layer["dropout"](attn_out)
+            
+            #.  norm + ffn
+            normed = layer["norm2"](fused)
+            ffn_out = layer["ffn"](normed)
+            fused = fused + layer["dropout"](ffn_out)
         
         # global pooling
         pooled = fused.mean(dim=1)

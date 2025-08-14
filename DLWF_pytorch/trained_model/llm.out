@@ -222,3 +222,12 @@ Accuracy: 0.802,Recall: 0.802,Precision: 0.816,F1-score: 0.799
 epoch 11> loss:0.8093847036361694, accuracy:0.7347125
 epoch 12> loss:0.7029931545257568, accuracy:0.7554525
 epoch 13> loss:1.0813857316970825, accuracy:0.7723725
+epoch 0> loss:1.6598854064941406, accuracy:0.2399375
+Validation Loss: 2.4266516019011397, Validation Accuracy: 0.40146%
+epoch 0> loss:2.2589919567108154, accuracy:0.39865728900255754
+Validation Loss: 2.4266516019011397, Validation Accuracy: 0.40146
+Accuracy: 0.399,Recall: 0.399,Precision: 0.392,F1-score: 0.381
+epoch 1> loss:0.4361572265625, accuracy:0.801175
+epoch 2> loss:0.3459533751010895, accuracy:0.8940175
+epoch 3> loss:0.18272002041339874, accuracy:0.91695
+epoch 4> loss:0.31038933992385864, accuracy:0.93008
