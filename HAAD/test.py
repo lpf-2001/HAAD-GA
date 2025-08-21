@@ -60,5 +60,6 @@ haad = HAAD(
     max_iter=1
 )
 best_combination, best_score = haad.run(labels=y_train)
-haad.evaluate_solution(model=model2,labels=y_train,solution=best_combination)
+loss,correct = haad.evaluate_solution(model=model2,labels=y_train,solution=best_combination)
 print("最优注入位置组合：", best_combination)
+print("预测准确率：",correct)
