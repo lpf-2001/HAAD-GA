@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional
+from tqdm import tqdm
 
 class HAAD:
     """
@@ -202,6 +203,9 @@ class HAAD:
         if original_trace is None:
             original_trace = self.original_trace
         else:
+            if original_trace.ndim == 2:
+                original_trace = original_trace.unsqueeze(-1)
+            original_trace = torch.as_tensor(original_trace, dtype=torch.float32)
             original_trace = original_trace.to(self.device, non_blocking=True).contiguous()
 
         for s in range(0, self.B, eval_chunk):
@@ -212,7 +216,7 @@ class HAAD:
 
             pert = self.apply_perturbation_chunk(x_chunk, solution)
             with torch.cuda.amp.autocast(enabled=self.use_amp):
-                logits = self.model(pert)
+                logits = model(pert)
                 loss = F.cross_entropy(logits, t_chunk, reduction="mean")
             total_loss += float(loss) * (e - s)
             total_correct += int((logits.argmax(dim=-1) == t_chunk).sum().item())
@@ -258,7 +262,7 @@ class HAAD:
         best_solution = None
 
         # 2) 蚁群主循环（评估均为分块小步前向）
-        for it in range(self.max_iter):
+        for it in tqdm(range(self.max_iter)):
             solutions = self.construct_solution()
             fit_list = []
             for sol in solutions:

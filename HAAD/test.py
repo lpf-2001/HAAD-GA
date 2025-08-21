@@ -57,7 +57,7 @@ haad = HAAD(
     original_trace=X_train,
     numant=10,
     max_inject=500,  # 最多注入 5 个虚包
-    max_iter=1
+    max_iter=10
 )
 best_combination, best_score = haad.run(labels=y_train)
 loss,correct = haad.evaluate_solution(model=model2,labels=y_test,original_trace=X_test,solution=best_combination)
