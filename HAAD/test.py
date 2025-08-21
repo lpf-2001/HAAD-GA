@@ -39,12 +39,12 @@ args.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # model = Classifier(args)
 # model = load_model(model, args.load_model_path).to(args.device)
 model = MultiScaleLLM_V2(num_classes=num_classes).to(device)
-model.load_state_dict(torch.load(work_dir+'/../DLWF_pytorch/trained_model/length_5000/llm_rimmer100.pth'))
+model.load_state_dict(torch.load(work_dir+'/../DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer100.pth'))
 print_gpu_memory()
 
 
 model2 = VarCNN(5000,100).to(device)
-model2.load_state_dict(torch.load(work_dir+'/../DLWF_pytorch/trained_model/length_5000/varcnn_rimmer100.pth'))
+model2.load_state_dict(torch.load(work_dir+'/../DLWF_pytorch/trained_model/length_5000/Rimmer/varcnn_rimmer100.pth'))
 # model2 = DFNet(100).to(args.device)
 # model2.load_state_dict(torch.load(work_dir+'/../DLWF_pytorch/trained_model/length_5000/df_5000.pth'))
 X_train, y_train, X_valid, y_valid, X_test, y_test = load_rimmer_dataset(input_size=5000, num_classes=num_classes) #(124991, 1000, 1),(124991, 100)
@@ -60,6 +60,6 @@ haad = HAAD(
     max_iter=1
 )
 best_combination, best_score = haad.run(labels=y_train)
-loss,correct = haad.evaluate_solution(model=model2,labels=y_train,solution=best_combination)
+loss,correct = haad.evaluate_solution(model=model2,labels=y_test,original_trace=X_test,solution=best_combination)
 print("最优注入位置组合：", best_combination)
-print("预测准确率：",correct)
+print("预测准确率：",correct/y_train.shape[0])

@@ -189,7 +189,8 @@ class HAAD:
         solution: torch.Tensor,
         labels: torch.Tensor,
         eval_chunk: int = 1024,
-        model = None
+        model = None,
+        original_trace = None
     ):
         """对给定 solution 计算全量样本上的平均 loss 与正确数（分块小步前向）。"""
         labels = torch.as_tensor(labels, device=self.device)
@@ -198,10 +199,14 @@ class HAAD:
         total_seen = 0
         if model is None:
             model = self.model
+        if original_trace is None:
+            original_trace = self.original_trace
+        else:
+            original_trace = original_trace.to(self.device, non_blocking=True).contiguous()
 
         for s in range(0, self.B, eval_chunk):
             e = min(s + eval_chunk, self.B)
-            x_chunk = self.original_trace[s:e]
+            x_chunk = original_trace[s:e]
             y_chunk = labels[s:e]
             t_chunk = self._to_class_indices(y_chunk)
 
