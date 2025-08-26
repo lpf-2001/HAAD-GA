@@ -224,18 +224,18 @@ def main():
         'batch_size': 512,
         
         # 模型配置 - 替换为你的实际模型路径
-        # 'source_model_path': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer100.pth',  # 源模型llm（用于生成扰动）
-        'source_model_path':'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer100.pth',
+        'source_model_path': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer100.pth',  # 源模型llm（用于生成扰动）
+        # 'source_model_path':'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer100.pth',
         'target_models': {
-            # 'df': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer100.pth',        # 目标模型B
+            'df': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer100.pth',        # 目标模型B
             'varcnn': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/varcnn_rimmer100.pth',        # 目标模型C（可选）
-            'llm':'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer100.pth',
+            # 'llm':'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer100.pth',
         },
         
         # HAAD算法配置
         'haad_config': {
             'numant': 20,                    # 蚂蚁数量
-            'max_inject': 100,                # 最大扰动位置数
+            'max_inject': 200,                # 最大扰动位置数
             'max_iter': 10,                 # 最大迭代数
             'alpha': 1.0,                    # 信息素重要性
             'beta': 2.0,                     # 启发式信息重要性
@@ -247,8 +247,8 @@ def main():
         },
         
         # 实验配置
-        'fitness_type': 'loss_increase',     # 适应度函数类型
-        'heuristic_sample_size': 1000,       # 启发式信息采样大小
+        'fitness_type': 'accuracy_drop',     # 适应度函数类型
+        'heuristic_sample_size': 2000,       # 启发式信息采样大小
         'pheromone_strategy': 'elitist',     # 信息素更新策略
         
         # 输出配置
@@ -301,8 +301,8 @@ def main():
     
     # 加载源模型A（用于生成扰动）
     if os.path.exists(config['source_model_path']):
-        # source_model =  MultiScaleLLM_V2(num_classes=100).to(device)  # 替换为你的模型类
-        source_model = DFNet(100).to(device)
+        source_model =  MultiScaleLLM_V2(num_classes=100).to(device)  # 替换为你的模型类
+        # source_model = DFNet(100).to(device)
         source_model.load_state_dict(torch.load(config['source_model_path'], map_location=device))
         source_model.to(device)
         source_model.eval()

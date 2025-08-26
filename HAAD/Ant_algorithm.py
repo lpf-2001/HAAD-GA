@@ -1,19 +1,20 @@
-# blackbox_universal_haad.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Optional, Tuple, Union
 from tqdm import tqdm
 import gc
+import numpy as np
 
 
 class UniversalHAAD:
     """
-    通用扰动黑盒蚁群算法
-    - 纯黑盒优化，无梯度信息
-    - 生成通用扰动模式，应用于所有样本
-    - 基于模型输出的适应度评估
-    - 显存友好的实现
+    修复版本的通用扰动黑盒蚁群算法
+    主要修复：
+    1. 启发式信息计算的采样率问题
+    2. 适应度计算的稳定性
+    3. 信息素更新策略
+    4. 数值稳定性改进
     """
 
     def __init__(
@@ -24,7 +25,7 @@ class UniversalHAAD:
         max_inject: int = 10,
         max_iter: int = 100,
         alpha: float = 1.0,
-        beta: float = 1.0,
+        beta: float = 2.0,  # 增加启发式信息权重
         rho: float = 0.1,
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
@@ -34,22 +35,6 @@ class UniversalHAAD:
         memory_limit_mb: float = 8192,
         eval_chunk_size: int = 512,
     ):
-        """
-        Args:
-            model: 目标模型
-            original_trace: 原始数据 [B, L] 或 [B, L, C]
-            numant: 蚂蚁数量
-            max_inject: 每个解的最大扰动位置数
-            max_iter: 最大迭代数
-            alpha: 信息素重要性参数
-            beta: 启发式信息重要性参数  
-            rho: 信息素蒸发率
-            inject_value: 扰动值，可以是具体数值或'random'
-            perturb_mode: 扰动模式 'overwrite' 或 'insert'
-            use_amp: 是否使用混合精度
-            memory_limit_mb: 显存限制(MB)
-            eval_chunk_size: 评估时的批量大小
-        """
         assert perturb_mode in ("overwrite", "insert")
         
         self.model = model
@@ -76,7 +61,7 @@ class UniversalHAAD:
 
         # 初始化信息素和启发式信息
         self.tau = torch.ones(self.L, device=self.device, dtype=dtype)
-        self.eta = torch.ones(self.L, device=self.device, dtype=dtype)  # 初始化为均匀分布
+        self.eta = torch.ones(self.L, device=self.device, dtype=dtype)
 
         # 状态变量
         self.best_solution = None
@@ -86,6 +71,9 @@ class UniversalHAAD:
         # 模型配置
         self.model.to(self.device)
         self.model.eval()
+        
+        # 添加适应度基线，用于稳定计算
+        self.fitness_baseline = 0.0
 
     def _preprocess_data(self, data: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
         """预处理数据，统一格式为 [B, L, C]"""
@@ -114,7 +102,8 @@ class UniversalHAAD:
     def _generate_inject_value(self, shape: torch.Size) -> torch.Tensor:
         """生成注入值"""
         if self.inject_value == 'random':
-            return torch.rand(shape, device=self.device, dtype=self.original_trace.dtype)
+            # 使用更激进的随机值范围
+            return torch.randn(shape, device=self.device, dtype=self.original_trace.dtype) * 0.5
         else:
             return torch.full(shape, float(self.inject_value), 
                             device=self.device, dtype=self.original_trace.dtype)
@@ -125,16 +114,7 @@ class UniversalHAAD:
         data: torch.Tensor, 
         perturbation_positions: torch.Tensor
     ) -> torch.Tensor:
-        """
-        应用通用扰动到数据
-        
-        Args:
-            data: 输入数据 [B, L, C]
-            perturbation_positions: 扰动位置 [K] (K <= max_inject)
-            
-        Returns:
-            扰动后的数据 [B, L, C]
-        """
+        """应用通用扰动到数据"""
         if len(perturbation_positions) == 0:
             return data
             
@@ -147,37 +127,30 @@ class UniversalHAAD:
             perturbed[:, positions, :] = inject_vals
             
         elif self.perturb_mode == "insert":
-            # 在指定位置插入扰动（需要截断以保持长度）
+            # 插入模式的实现（保持原有逻辑）
             B, L, C = data.shape
             K = len(positions)
             
-            # 创建扩展数据
             extended = torch.zeros(B, L + K, C, device=self.device, dtype=data.dtype)
-            
-            # 排序位置以正确插入
             sorted_pos, sort_idx = torch.sort(positions)
             
             current_orig = 0
             current_ext = 0
             
             for i, pos in enumerate(sorted_pos):
-                # 复制原始数据到插入位置之前
                 if pos > current_orig:
                     copy_len = pos - current_orig
                     extended[:, current_ext:current_ext+copy_len, :] = data[:, current_orig:pos, :]
                     current_ext += copy_len
                     current_orig = pos
                 
-                # 插入扰动值
                 inject_val = self._generate_inject_value((B, 1, C))
                 extended[:, current_ext, :] = inject_val.squeeze(1)
                 current_ext += 1
             
-            # 复制剩余的原始数据
             if current_orig < L:
                 extended[:, current_ext:current_ext+(L-current_orig), :] = data[:, current_orig:, :]
             
-            # 截断到原始长度
             perturbed = extended[:, :L, :]
         
         return perturbed
@@ -187,98 +160,98 @@ class UniversalHAAD:
         self, 
         perturbation_positions: torch.Tensor, 
         labels: torch.Tensor,
-        fitness_type: str = "loss_increase"
+        fitness_type: str = "accuracy_drop",
+        sample_trace: Optional[torch.Tensor] = None
     ) -> float:
-        """
-        评估扰动方案的适应度（纯黑盒）
-        
-        Args:
-            perturbation_positions: 扰动位置
-            labels: 真实标签
-            fitness_type: 适应度类型
-                - "loss_increase": 损失增加量
-                - "accuracy_drop": 准确率下降
-                - "confidence_drop": 置信度下降
-                
-        Returns:
-            适应度值（越大越好）
-        """
+        """评估扰动方案的适应度（改进版）"""
         if len(perturbation_positions) == 0:
             return 0.0
             
         total_fitness = 0.0
         total_samples = 0
-        
+        if sample_trace is None:
+            sample_trace = self.original_trace
         # 分块处理以节省显存
-        for start_idx in range(0, self.B, self.eval_chunk_size):
+        for start_idx in range(0, sample_trace.shape[0], self.eval_chunk_size):
             end_idx = min(start_idx + self.eval_chunk_size, self.B)
             
             # 获取数据块
-            data_chunk = self.original_trace[start_idx:end_idx]
+            data_chunk = sample_trace[start_idx:end_idx]
             label_chunk = labels[start_idx:end_idx]
             target_chunk = self._to_class_indices(label_chunk)
-            
-            # 计算原始输出
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
-                original_logits = self.model(data_chunk)
-                original_loss = F.cross_entropy(original_logits, target_chunk, reduction='mean')
-                
-            # 应用扰动
-            perturbed_chunk = self.apply_universal_perturbation(data_chunk, perturbation_positions)
-            
-            # 计算扰动后输出
-            with torch.cuda.amp.autocast(enabled=self.use_amp):
-                perturbed_logits = self.model(perturbed_chunk)
-                perturbed_loss = F.cross_entropy(perturbed_logits, target_chunk, reduction='mean')
-            
-            # 计算适应度
             chunk_size = end_idx - start_idx
             
-            if fitness_type == "loss_increase":
-                # 损失增加量
-                fitness_chunk = float(perturbed_loss - original_loss) * chunk_size
+            try:
+                # 计算原始输出
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    original_logits = self.model(data_chunk)
+                    
+                # 应用扰动
+                perturbed_chunk = self.apply_universal_perturbation(data_chunk, perturbation_positions)
                 
-            elif fitness_type == "accuracy_drop":
-                # 准确率下降
-                orig_correct = (original_logits.argmax(dim=-1) == target_chunk).sum().float()
-                pert_correct = (perturbed_logits.argmax(dim=-1) == target_chunk).sum().float()
-                fitness_chunk = float(orig_correct - pert_correct)
+                # 计算扰动后输出
+                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                    perturbed_logits = self.model(perturbed_chunk)
                 
-            elif fitness_type == "confidence_drop":
-                # 目标类别置信度下降
-                orig_conf = F.softmax(original_logits, dim=-1)[torch.arange(chunk_size), target_chunk]
-                pert_conf = F.softmax(perturbed_logits, dim=-1)[torch.arange(chunk_size), target_chunk]
-                fitness_chunk = float((orig_conf - pert_conf).sum())
+                # 计算适应度
+                if fitness_type == "loss_increase":
+                    # 改进的损失计算，使用更稳定的方式
+                    original_loss = F.cross_entropy(original_logits, target_chunk, reduction='none')
+                    perturbed_loss = F.cross_entropy(perturbed_logits, target_chunk, reduction='none')
+                    
+                    # 计算每个样本的损失增加，然后求和
+                    loss_diff = perturbed_loss - original_loss
+                    fitness_chunk = float(loss_diff.sum())
+                    
+                elif fitness_type == "accuracy_drop":
+                    # 准确率下降
+                    orig_correct = (original_logits.argmax(dim=-1) == target_chunk).float()
+                    pert_correct = (perturbed_logits.argmax(dim=-1) == target_chunk).float()
+                    fitness_chunk = float((orig_correct - pert_correct).sum())
+                    
+                elif fitness_type == "confidence_drop":
+                    # 目标类别置信度下降
+                    orig_probs = F.softmax(original_logits, dim=-1)
+                    pert_probs = F.softmax(perturbed_logits, dim=-1)
+                    
+                    orig_conf = orig_probs[torch.arange(chunk_size), target_chunk]
+                    pert_conf = pert_probs[torch.arange(chunk_size), target_chunk]
+                    fitness_chunk = float((orig_conf - pert_conf).sum())
+                    
+                else:
+                    raise ValueError(f"未知的适应度类型: {fitness_type}")
                 
-            else:
-                raise ValueError(f"未知的适应度类型: {fitness_type}")
-            
-            total_fitness += fitness_chunk
-            total_samples += chunk_size
+                total_fitness += fitness_chunk
+                total_samples += chunk_size
+                
+            except Exception as e:
+                print(f"适应度计算出错: {e}")
+                # 出错时返回一个小的负值
+                total_fitness += -0.1 * chunk_size
+                total_samples += chunk_size
             
             # 清理中间变量
             del data_chunk, label_chunk, target_chunk
-            del original_logits, perturbed_logits, original_loss, perturbed_loss, perturbed_chunk
+            if 'original_logits' in locals():
+                del original_logits, perturbed_logits, perturbed_chunk
         
         # 清理显存
         self._cleanup_gpu_memory()
         
-        return total_fitness / max(total_samples, 1)
+        # 返回平均适应度
+        avg_fitness = total_fitness / max(total_samples, 1)
+        return avg_fitness
 
     @torch.inference_mode()
     def update_heuristic_info(
         self, 
         labels: torch.Tensor, 
         sample_size: Optional[int] = None,
-        fitness_type: str = "loss_increase"
+        fitness_type: str = "loss_increase",
+        sample_positions: int = 5000  # 限制采样的位置数量
     ):
         """
-        通过单位置扰动更新启发式信息（黑盒方式）
-        
-        Args:
-            labels: 标签
-            sample_size: 采样数量，None表示使用全部数据
-            fitness_type: 适应度类型
+        更新启发式信息（修复版本）
         """
         print("更新启发式信息...")
         
@@ -293,78 +266,75 @@ class UniversalHAAD:
             
         eta_values = torch.zeros(self.L, device=self.device)
         
+        # 采样位置以加速计算，而不是计算所有位置
+        if sample_positions < self.L:
+            position_indices = torch.randperm(self.L)[:sample_positions].sort()[0]
+        else:
+            position_indices = torch.arange(self.L)
+        
+        print(f"计算 {len(position_indices)} 个位置的敏感性（总共{self.L}个位置）")
+        
         # 逐位置计算启发式信息
-        for pos in tqdm(range(self.L), desc="计算位置敏感性", leave=False):
+        for i, pos in enumerate(tqdm(position_indices, desc="计算位置敏感性", leave=False)):
+            pos = int(pos)
             position_tensor = torch.tensor([pos], device=self.device)
             
-            # 计算单个位置的适应度
-            fitness = 0.0
-            total_samples = 0
-            
-            for start_idx in range(0, sample_data.size(0), self.eval_chunk_size):
-                end_idx = min(start_idx + self.eval_chunk_size, sample_data.size(0))
-                
-                data_chunk = sample_data[start_idx:end_idx]
-                label_chunk = sample_labels[start_idx:end_idx]
-                target_chunk = self._to_class_indices(label_chunk)
-                
-                # 原始预测
-                with torch.cuda.amp.autocast(enabled=self.use_amp):
-                    orig_logits = self.model(data_chunk)
-                    
-                # 扰动后预测
-                pert_chunk = self.apply_universal_perturbation(data_chunk, position_tensor)
-                with torch.cuda.amp.autocast(enabled=self.use_amp):
-                    pert_logits = self.model(pert_chunk)
-                
-                # 计算适应度贡献
-                chunk_size = end_idx - start_idx
-                
-                if fitness_type == "loss_increase":
-                    orig_loss = F.cross_entropy(orig_logits, target_chunk, reduction='mean')
-                    pert_loss = F.cross_entropy(pert_logits, target_chunk, reduction='mean')
-                    fitness += float(pert_loss - orig_loss) * chunk_size
-                    
-                elif fitness_type == "accuracy_drop":
-                    orig_correct = (orig_logits.argmax(dim=-1) == target_chunk).sum().float()
-                    pert_correct = (pert_logits.argmax(dim=-1) == target_chunk).sum().float()
-                    fitness += float(orig_correct - pert_correct)
-                    
-                total_samples += chunk_size
-                
-                del data_chunk, label_chunk, target_chunk, orig_logits, pert_logits, pert_chunk
-            
-            eta_values[pos] = fitness / max(total_samples, 1)
+            try:
+                # 计算单个位置的适应度
+                fitness = self.evaluate_fitness(position_tensor, sample_labels, fitness_type, sample_trace=sample_data)
+                eta_values[pos] = max(fitness, 0.001)  # 确保最小值为正
+            except Exception as e:
+                print(f"位置 {pos} 计算出错: {e}")
+                eta_values[pos] = 0.001
         
-        # 归一化启发式信息
+        # 对于未采样的位置，使用平均值
+        if sample_positions < self.L:
+            sampled_mean = eta_values[position_indices].mean()
+            eta_values[eta_values == 0] = sampled_mean
+        
+        # 改进的归一化启发式信息
         eta_min, eta_max = eta_values.min(), eta_values.max()
-        if eta_max - eta_min > 1e-8:
-            self.eta = (eta_values - eta_min) / (eta_max - eta_min + 1e-8)
+        if eta_max > eta_min + 1e-8:
+            # 使用更稳定的归一化
+            self.eta = ((eta_values - eta_min) / (eta_max - eta_min)) + 0.01
         else:
-            self.eta = torch.ones_like(eta_values) / self.L
+            # 如果所有值相似，使用均匀分布加小扰动
+            self.eta = torch.ones_like(eta_values) + torch.randn_like(eta_values) * 0.01
             
-        # 确保所有值为正
-        self.eta = self.eta.clamp_min(1e-8)
+        # 确保所有值为正且在合理范围内
+        self.eta = self.eta.clamp_min(0.01).clamp_max(10.0)
         
+        print(f"启发式信息更新完成，范围: [{self.eta.min():.4f}, {self.eta.max():.4f}]")
         self._cleanup_gpu_memory()
 
     def construct_solutions(self) -> List[torch.Tensor]:
-        """基于信息素和启发式信息构造解"""
-        # 计算选择概率
-
-        weights1 = (self.tau ** self.alpha) 
-        weights2 = (self.eta ** self.beta)
-        weights = weights1 * weights2
-        probabilities = weights / weights.sum()
+        """基于信息素和启发式信息构造解（改进版）"""
+        # 计算选择概率，添加数值稳定性
+        tau_weighted = torch.pow(self.tau + 1e-8, self.alpha)
+        eta_weighted = torch.pow(self.eta + 1e-8, self.beta)
+        weights = tau_weighted * eta_weighted
+        
+        # 添加少量随机噪声以避免过早收敛
+        noise = torch.randn_like(weights) * 0.01
+        weights = weights + noise.abs()
+        
+        # 归一化概率
+        probabilities = weights / (weights.sum() + 1e-8)
         
         solutions = []
-        for _ in tqdm(range(self.numant),desc="蚂蚁数",leave=False):
-            # 使用轮盘赌选择，无重复
-            if self.max_inject <= self.L:
-                chosen = torch.multinomial(probabilities, self.max_inject, replacement=False)
-            else:
-                chosen = torch.multinomial(probabilities, self.max_inject, replacement=True)
-            solutions.append(chosen)
+        for ant_id in range(self.numant):
+            try:
+                # 使用轮盘赌选择
+                if self.max_inject <= self.L:
+                    chosen = torch.multinomial(probabilities, self.max_inject, replacement=False)
+                else:
+                    chosen = torch.multinomial(probabilities, self.max_inject, replacement=True)
+                solutions.append(chosen)
+            except Exception as e:
+                print(f"蚂蚁 {ant_id} 构造解时出错: {e}")
+                # 回退到随机选择
+                chosen = torch.randperm(self.L)[:self.max_inject]
+                solutions.append(chosen)
             
         return solutions
 
@@ -374,34 +344,26 @@ class UniversalHAAD:
         fitness_values: List[float],
         strategy: str = "elitist"
     ):
-        """
-        信息素更新
-        
-        Args:
-            solutions: 解的列表
-            fitness_values: 对应的适应度值
-            strategy: 更新策略 ("elitist", "rank", "proportional")
-        """
+        """信息素更新（改进版）"""
         # 信息素蒸发
         self.tau *= (1.0 - self.rho)
         
         fitness_tensor = torch.tensor(fitness_values, device=self.device)
         
+        # 处理适应度值，确保为正值或合理范围
+        if fitness_tensor.min() < 0:
+            # 将适应度值平移到正数范围
+            fitness_tensor = fitness_tensor - fitness_tensor.min() + 0.1
+        
         if strategy == "elitist":
-            # 只有最优解更新信息素
-            best_idx = fitness_tensor.argmax()
-            best_solution = solutions[best_idx]
-            best_fitness = fitness_values[best_idx]
+            # 精英策略：最优解和前几名都更新信息素
+            sorted_indices = fitness_tensor.argsort(descending=True)
+            top_k = min(3, len(solutions))  # 取前3名
             
-            # 归一化适应度值作为更新量
-            if len(fitness_values) > 1:
-                fitness_range = max(fitness_values) - min(fitness_values)
-                update_amount = best_fitness / max(fitness_range, 1e-8)
-            else:
-                update_amount = 1.0
+            for rank, idx in enumerate(sorted_indices[:top_k]):
+                weight = (top_k - rank) / top_k * fitness_tensor[idx] / (fitness_tensor.max() + 1e-8)
+                self.tau[solutions[idx]] += float(weight)
                 
-            self.tau[best_solution] += update_amount
-            
         elif strategy == "rank":
             # 基于排名的更新
             sorted_indices = fitness_tensor.argsort(descending=True)
@@ -412,17 +374,19 @@ class UniversalHAAD:
         elif strategy == "proportional":
             # 比例更新
             if fitness_tensor.max() > fitness_tensor.min():
-                normalized_fitness = (fitness_tensor - fitness_tensor.min()) / (fitness_tensor.max() - fitness_tensor.min())
+                normalized_fitness = fitness_tensor / (fitness_tensor.sum() + 1e-8)
                 for sol, weight in zip(solutions, normalized_fitness):
                     self.tau[sol] += float(weight)
         
-        # 归一化信息素，避免数值问题
-        tau_min, tau_max = self.tau.min(), self.tau.max()
-        if tau_max - tau_min > 1e-8:
-            self.tau = (self.tau - tau_min) / (tau_max - tau_min + 1e-8)
+        # 改进的信息素边界控制
+        self.tau = self.tau.clamp(0.01, 5.0)  # 限制在更小的范围内
         
-        # 确保信息素在合理范围内
-        self.tau = self.tau.clamp(1e-8, 10.0)
+        # 添加信息素重新初始化机制，防止过早收敛
+        if self.tau.std() < 0.1:  # 如果信息素分布过于均匀
+            print("信息素分布过于均匀，添加扰动")
+            noise = torch.randn_like(self.tau) * 0.1
+            self.tau += noise.abs()
+            self.tau = self.tau.clamp(0.01, 5.0)
 
     @torch.inference_mode()
     def run(
@@ -433,19 +397,7 @@ class UniversalHAAD:
         pheromone_strategy: str = "elitist",
         verbose: bool = True
     ) -> Tuple[torch.Tensor, float]:
-        """
-        运行通用扰动优化
-        
-        Args:
-            labels: 目标标签
-            heuristic_sample_size: 启发式信息计算的采样大小
-            fitness_type: 适应度函数类型
-            pheromone_strategy: 信息素更新策略
-            verbose: 是否显示详细信息
-            
-        Returns:
-            (最优扰动位置, 最优适应度)
-        """
+        """运行通用扰动优化（改进版）"""
         labels = torch.as_tensor(labels, device=self.device)
         
         if verbose:
@@ -453,16 +405,25 @@ class UniversalHAAD:
             print(f"蚂蚁数量: {self.numant}, 最大扰动位置: {self.max_inject}")
             print(f"适应度类型: {fitness_type}")
         
+        # 计算适应度基线（无扰动时的适应度）
+        try:
+            self.fitness_baseline = self.evaluate_fitness(torch.tensor([], device=self.device), labels, fitness_type)
+            print(f"适应度基线: {self.fitness_baseline:.6f}")
+        except:
+            self.fitness_baseline = 0.0
+        
         # 初始化启发式信息
         self.update_heuristic_info(
             labels, 
             sample_size=heuristic_sample_size,
-            fitness_type=fitness_type
+            fitness_type=fitness_type,
+            sample_positions=min(5000, self.L)  # 限制采样位置数
         )
         
         # 蚁群优化主循环
         best_fitness = -float('inf')
         best_solution = None
+        stagnation_count = 0
         
         for iteration in tqdm(range(self.max_iter), desc="ACO优化"):
             # 构造解
@@ -470,34 +431,68 @@ class UniversalHAAD:
             
             # 评估所有解
             fitness_values = []
-            for solution in solutions:
-                fitness = self.evaluate_fitness(solution, labels, fitness_type)
-                fitness_values.append(fitness)
-                
-                # 更新全局最优
-                if fitness > best_fitness:
-                    best_fitness = fitness
-                    best_solution = solution.clone()
+            valid_solutions = []
+            valid_fitness = []
             
-            # 更新信息素
-            self.update_pheromone(solutions, fitness_values, pheromone_strategy)
+            for i, solution in enumerate(solutions):
+                try:
+                    fitness = self.evaluate_fitness(solution, labels, fitness_type)
+                    fitness_values.append(fitness)
+                    valid_solutions.append(solution)
+                    valid_fitness.append(fitness)
+                    
+                    if verbose and i % 10 == 0:  # 减少输出频率
+                        print(f"Iter {iteration}, Ant {i}: 适应度: {fitness:.6f}")
+                    
+                    # 更新全局最优
+                    if fitness > best_fitness:
+                        best_fitness = fitness
+                        best_solution = solution.clone()
+                        stagnation_count = 0
+                    else:
+                        stagnation_count += 1
+                        
+                except Exception as e:
+                    print(f"蚂蚁 {i} 评估失败: {e}")
+                    # 给失败的解一个很小的适应度值
+                    fitness_values.append(-1.0)
+                    valid_solutions.append(solution)
+                    valid_fitness.append(-1.0)
+            
+            if not valid_fitness:
+                print(f"第 {iteration} 轮所有解都失败，跳过")
+                continue
+            
+            # 更新信息素（只使用有效的解）
+            if len(valid_solutions) > 0:
+                self.update_pheromone(valid_solutions, valid_fitness, pheromone_strategy)
             
             # 记录历史
-            self.fitness_history.append(max(fitness_values))
+            current_best = max(valid_fitness) if valid_fitness else -1.0
+            self.fitness_history.append(current_best)
             
-            if verbose and (iteration + 1) % max(1, self.max_iter // 10) == 0:
-                current_best = max(fitness_values)
-                avg_fitness = sum(fitness_values) / len(fitness_values)
-                print(f"[Iter {iteration+1}] 最优适应度: {best_fitness:.6f}, "
+            if verbose and (iteration + 1) % max(1, self.max_iter // 20) == 0:
+                avg_fitness = sum(valid_fitness) / len(valid_fitness) if valid_fitness else 0
+                print(f"[Iter {iteration+1}] 全局最优: {best_fitness:.6f}, "
                       f"当前轮最优: {current_best:.6f}, 平均: {avg_fitness:.6f}")
+                print(f"信息素范围: [{self.tau.min():.4f}, {self.tau.max():.4f}]")
+            
+            # 早停机制
+            if stagnation_count > 20 and iteration > self.max_iter // 3:
+                print(f"连续 {stagnation_count} 轮无改进，提前停止")
+                break
         
         self.best_solution = best_solution
         self.best_fitness = best_fitness
         
         if verbose:
             print(f"\n优化完成!")
-            print(f"最优扰动位置: {best_solution.cpu().numpy()}")
-            print(f"最优适应度: {best_fitness:.6f}")
+            if best_solution is not None:
+                print(f"最优扰动位置: {best_solution.cpu().numpy()}")
+                print(f"最优适应度: {best_fitness:.6f}")
+                print(f"相对基线提升: {best_fitness - self.fitness_baseline:.6f}")
+            else:
+                print("未找到有效解")
         
         return best_solution, best_fitness
 
@@ -510,10 +505,10 @@ class UniversalHAAD:
             "perturbation_positions": self.best_solution.cpu().numpy().tolist(),
             "num_positions": len(self.best_solution),
             "fitness": self.best_fitness,
+            "fitness_baseline": self.fitness_baseline,
+            "fitness_improvement": self.best_fitness - self.fitness_baseline,
             "perturbation_ratio": len(self.best_solution) / self.L,
             "fitness_history": self.fitness_history,
-            # "final_tau": self.tau.cpu().numpy(),
-            # "final_eta": self.eta.cpu().numpy(),
         }
 
     def apply_to_new_data(self, new_data: torch.Tensor) -> torch.Tensor:
