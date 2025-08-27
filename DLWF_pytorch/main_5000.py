@@ -202,6 +202,7 @@ def train_model(model, learn_param, model_train=True):
     for epoch in range(epochs):
         model.train()
         total_correct, total_samples = 0, 0
+        batch_, batch = 0, 0
         with tqdm(train_loader, desc=f"Epoch {epoch+1}/{epochs}") as tepoch:
             for batch_x, batch_y in tepoch:
                 optimizer.zero_grad()
@@ -214,25 +215,27 @@ def train_model(model, learn_param, model_train=True):
                 optimizer.step()
 
                 preds = outputs.argmax(1)
-                total_correct += (preds == batch_y.argmax(1)).sum().item()
-                total_samples += batch_y.size(0)
-                tepoch.set_postfix(loss=loss.item(), accuracy=total_correct/total_samples)
+                batch_ = (preds == batch_y.argmax(1)).sum().item()
+                total_correct += batch_
+                batch = batch_y.size(0)
+                total_samples += batch
+                tepoch.set_postfix(loss=loss.item(), accuracy=f"{100*batch_/batch:.2f}%")
 
-        log(None, f"Epoch {epoch+1} > loss: {loss.item()}, accuracy: {total_correct/total_samples:.4f}\n", model_type)
+        log(None, f"Epoch {epoch+1} > loss: {loss.item()}, accuracy: {100*total_correct/total_samples:.2f}%\n", model_type)
 
         # 验证 & 测试
         if (epoch+1) % 5 == 0:
             val_loss, val_acc = evaluate(model, val_loader, criterion, device)
-            log(None, f"Validation Loss: {val_loss:.4f}, Validation Accuracy: {val_acc:.4f}\n", model_type)
+            log(None, f"Validation Loss: {val_loss:.2f}, Validation Accuracy: {100*val_acc:.2f}%\n", model_type)
 
             _, _, metrics = evaluate(model, test_loader, criterion, device, calc_metrics=True)
             # 保存最优
             if metrics["f1"] > best_f1:
                 torch.save(model.state_dict(), save_paths[model_type])
                 best_f1 = metrics["f1"]
-            log(None, f"Accuracy: {metrics['accuracy']:.3f}, Recall: {metrics['recall']:.3f}, "
-                      f"Precision: {metrics['precision']:.3f}, F1-score: {metrics['f1']:.3f}\n", model_type)
-            log(None, f"best_f1: {best_f1:.3f}\n", model_type)
+            log(None, f"Accuracy: {100*metrics['accuracy']:.2f}%, Recall: {100*metrics['recall']:.2f}%, "
+                      f"Precision: {100*metrics['precision']:.2f}%, F1-score: {100*metrics['f1']:.2f}%\n", model_type)
+            log(None, f"best_f1: {100*best_f1:.2f}%\n", model_type)
             
 
 
