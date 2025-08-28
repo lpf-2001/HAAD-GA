@@ -233,10 +233,11 @@ def main():
         
         # 模型配置 - 替换为你的实际模型路径
         # 'source_model_path': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer500.pth',  # 源模型llm（用于生成扰动）
-        'source_model_path':f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_{datatype}.pth',
+        # 'source_model_path':f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_{datatype}.pth',
+        'source_model_path':f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/varcnn_{datatype}.pth',
         'target_models': {
-            # 'df': f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_{datatype}.pth',        # 目标模型B
-            'varcnn': f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/varcnn_{datatype}.pth',        # 目标模型C（可选）
+            'df': f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_{datatype}.pth',        # 目标模型B
+            # 'varcnn': f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/varcnn_{datatype}.pth',        # 目标模型C（可选）
             'llm':f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_{datatype}.pth',
         },
         
@@ -310,7 +311,8 @@ def main():
     # 加载源模型A（用于生成扰动）
     if os.path.exists(config['source_model_path']):
         # source_model =  MultiScaleLLM_V2(num_classes).to(device)  # 替换为你的模型类
-        source_model = DFNet(num_classes).to(device)
+        # source_model = DFNet(num_classes).to(device)
+        source_model = VarCNN(5000,num_classes).to(device)
         source_model.load_state_dict(torch.load(config['source_model_path'], map_location=device))
         source_model.to(device)
         source_model.eval()
