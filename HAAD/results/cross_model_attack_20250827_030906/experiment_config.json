@@ -1,0 +1,27 @@
+{
+  "data_path": "/home/xuke/lpf/HAAD-GA/utils/Dataset/Rimmer/tor_100w_2500tr.npz",
+  "batch_size": 512,
+  "source_model_path": "/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/varcnn_rimmer100.pth",
+  "target_models": {
+    "df": "/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer100.pth",
+    "llm": "/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer100.pth"
+  },
+  "haad_config": {
+    "numant": 20,
+    "max_inject": 200,
+    "max_iter": 10,
+    "alpha": 1.0,
+    "beta": 2.0,
+    "rho": 0.1,
+    "inject_value": 1.0,
+    "perturb_mode": "overwrite",
+    "memory_limit_mb": 8192,
+    "eval_chunk_size": 256
+  },
+  "fitness_type": "accuracy_drop",
+  "heuristic_sample_size": 2000,
+  "pheromone_strategy": "elitist",
+  "output_dir": "results/cross_model_attack",
+  "save_plots": true,
+  "verbose": true
+}
