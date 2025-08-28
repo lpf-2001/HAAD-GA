@@ -484,39 +484,7 @@ class DFNet(nn.Module):
         x = self.fc3(x)
         return x
 
-
-
-##############################添加部份###############################
-class HighFreqConv(nn.Module):
-    """1-D 高频卷积：中心差分 + 1×1 融合"""
-    def __init__(self, out_ch):
-        super().__init__()
-        self.conv_diff = nn.Conv1d(1, out_ch, kernel_size=3, padding=1, bias=False)
-        self.conv_1x1  = nn.Conv1d(out_ch, out_ch, kernel_size=1, bias=False)
-    def forward(self, x):
-        # 中心差分近似
-        diff = x[:, :, 2:] + x[:, :, :-2] - 2 * x[:, :, 1:-1]
-        diff = F.pad(diff, (1, 1))                # 对齐长度
-        out  = self.conv_diff(diff)
-        return self.conv_1x1(out)
-
-
-
-class DWNoise(nn.Module):
-    def __init__(self, std=0.05):
-        super().__init__()
-        self.std = std
-    def forward(self, x):
-        if self.training:
-            noise = torch.randn_like(x) * self.std
-            return x + noise
-        return x
-
-
-
-
-
-#####################################################################
+    
 
 
 class ScaleFusion(nn.Module):
@@ -623,7 +591,6 @@ class DownBlock(nn.Module):
         self.bn2   = nn.BatchNorm1d(channels, eps=1e-5)
         self.act2  = nn.GELU()
         self.se    = SqueezeExcite1d(channels)
-        self.dwn   = DWNoise(std=0.05)          # 新增
         self.drop  = nn.Dropout(p_drop)
         self.pool_res = nn.AvgPool1d(kernel_size=2, stride=2)  # 残差支路下采样
     def forward(self, x):  # x: [B, C, L]
@@ -652,7 +619,7 @@ class MultiScaleLLM_V2(nn.Module):
         attn_heads: int = 4,
         attn_layers: int = 8,          # 先从 2~4 层开始，稳了再加深
         attn_dropout: float = 0.1,
-        drop_path: float = 0.15,
+        drop_path: float = 0.1,
         fuse_mode: str = 'gated'       # 'gated' | 'sum' | 'concat'
     ):
         super().__init__()
@@ -662,8 +629,7 @@ class MultiScaleLLM_V2(nn.Module):
 
         # ---- 输入是 [-1, +1] 的标量序列：用 Conv1d 当作 stem（比 Embedding 更贴合连续信号）
         self.stem = nn.Sequential(
-            # nn.Conv1d(1, conv_channels, kernel_size=7, padding=3, bias=False),
-            HighFreqConv(conv_channels),    #新增
+            nn.Conv1d(1, conv_channels, kernel_size=7, padding=3, bias=False),
             nn.BatchNorm1d(conv_channels, eps=1e-5),
             nn.GELU(),
             nn.Conv1d(conv_channels, conv_channels, kernel_size=3, padding=1, bias=False),
@@ -788,5 +754,3 @@ class MultiScaleLLM_V2(nn.Module):
         cls_out = seq[:, 0, :]                                   # [B, D]
         logits = self.head(cls_out)                              # [B, num_classes]
         return logits
-
-

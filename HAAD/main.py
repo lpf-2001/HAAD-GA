@@ -13,9 +13,11 @@ from Ant_algorithm import UniversalHAAD
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from DLWF_pytorch.model.model_5000 import *
+from DLWF_pytorch.model.model import *
 from utils.data import load_rimmer_dataset
 
+
+num_classes = 500
 
 class CrossModelAttackEvaluator:
     """跨模型攻击评估器"""
@@ -224,12 +226,12 @@ def main():
         'batch_size': 512,
         
         # 模型配置 - 替换为你的实际模型路径
-        'source_model_path': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer100.pth',  # 源模型llm（用于生成扰动）
-        # 'source_model_path':'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer100.pth',
+        # 'source_model_path': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer500.pth',  # 源模型llm（用于生成扰动）
+        'source_model_path':'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer500.pth',
         'target_models': {
-            'df': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer100.pth',        # 目标模型B
-            'varcnn': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/varcnn_rimmer100.pth',        # 目标模型C（可选）
-            # 'llm':'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer100.pth',
+            # 'df': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer500.pth',        # 目标模型B
+            'varcnn': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/varcnn_rimmer500.pth',        # 目标模型C（可选）
+            'llm':'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer500.pth',
         },
         
         # HAAD算法配置
@@ -278,7 +280,7 @@ def main():
     # 这里需要根据你的数据格式进行调整
     if os.path.exists(config['data_path']):
         # data_dict = torch.load(config['data_path'])
-        train_data, train_labels, valid_data, valid_labels, test_data, test_labels = load_rimmer_dataset(input_size=5000,num_classes=100,test_ratio=0.1,val_ratio=0.1)
+        train_data, train_labels, valid_data, valid_labels, test_data, test_labels = load_rimmer_dataset(input_size=5000,num_classes=500,test_ratio=0.1,val_ratio=0.8)
         train_data = torch.tensor(train_data, dtype=torch.float32)
         train_labels = torch.tensor(train_labels, dtype=torch.int)
         test_data = torch.tensor(test_data, dtype=torch.float32)
@@ -301,8 +303,8 @@ def main():
     
     # 加载源模型A（用于生成扰动）
     if os.path.exists(config['source_model_path']):
-        source_model =  MultiScaleLLM_V2(num_classes=100).to(device)  # 替换为你的模型类
-        # source_model = DFNet(100).to(device)
+        # source_model =  MultiScaleLLM_V2(num_classes).to(device)  # 替换为你的模型类
+        source_model = DFNet(num_classes).to(device)
         source_model.load_state_dict(torch.load(config['source_model_path'], map_location=device))
         source_model.to(device)
         source_model.eval()
@@ -322,11 +324,11 @@ def main():
     for name, path in config['target_models'].items():
         if os.path.exists(path):
             if name == 'df':
-                model = DFNet(100).to(device)
+                model = DFNet(num_classes).to(device)
             elif name == 'varcnn':
-                model = VarCNN(5000,100).to(device)
+                model = VarCNN(5000,num_classes).to(device)
             elif name == 'llm':
-                model = MultiScaleLLM_V2(num_classes=100).to(device)
+                model = MultiScaleLLM_V2(num_classes).to(device)
             model.load_state_dict(torch.load(path, map_location=device))
             model.to(device)
             model.eval()
