@@ -3,21 +3,27 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from typing import Dict, List, Tuple, Optional
 import json
 import os
-from datetime import datetime
+import argparse
 import matplotlib.pyplot as plt
-import seaborn as sns
-from Ant_algorithm import UniversalHAAD
 import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+from datetime import datetime
+from typing import Dict, List, Tuple, Optional
+from Ant_algorithm import UniversalHAAD
 from DLWF_pytorch.model.model import *
 from utils.data import load_rimmer_dataset
 
-
-num_classes = 500
+data_dict = {"rimmer100":100,
+             "rimmer200":200,
+             "rimmer500":500,
+             "rimmer900":900,
+             "sirinam":95}
+num_classes = None
+datatype = None
 
 class CrossModelAttackEvaluator:
     """跨模型攻击评估器"""
@@ -222,16 +228,16 @@ def main():
     # ==================== 配置参数 ====================
     config = {
         # 数据配置
-        'data_path': '/home/xuke/lpf/HAAD-GA/utils/Dataset/Rimmer/tor_100w_2500tr.npz',  # 你的数据文件路径
+        'data_path': f'/home/xuke/lpf/HAAD-GA/utils/Dataset/Rimmer/tor_{num_classes}w_2500tr.npz',  # 你的数据文件路径
         'batch_size': 512,
         
         # 模型配置 - 替换为你的实际模型路径
         # 'source_model_path': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer500.pth',  # 源模型llm（用于生成扰动）
-        'source_model_path':'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer500.pth',
+        'source_model_path':f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_{datatype}.pth',
         'target_models': {
-            # 'df': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_rimmer500.pth',        # 目标模型B
-            'varcnn': '/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/varcnn_rimmer500.pth',        # 目标模型C（可选）
-            'llm':'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_rimmer500.pth',
+            # 'df': f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/df_{datatype}.pth',        # 目标模型B
+            'varcnn': f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/varcnn_{datatype}.pth',        # 目标模型C（可选）
+            'llm':f'/home/xuke/lpf/HAAD-GA/DLWF_pytorch/trained_model/length_5000/Rimmer/llm_{datatype}.pth',
         },
         
         # HAAD算法配置
@@ -254,7 +260,7 @@ def main():
         'pheromone_strategy': 'elitist',     # 信息素更新策略
         
         # 输出配置
-        'output_dir': 'results/cross_model_attack',
+        'output_dir': f'results/{datatype}',
         'save_plots': True,
         'verbose': True
     }
@@ -280,7 +286,7 @@ def main():
     # 这里需要根据你的数据格式进行调整
     if os.path.exists(config['data_path']):
         # data_dict = torch.load(config['data_path'])
-        train_data, train_labels, valid_data, valid_labels, test_data, test_labels = load_rimmer_dataset(input_size=5000,num_classes=500,test_ratio=0.1,val_ratio=0.8)
+        train_data, train_labels, valid_data, valid_labels, test_data, test_labels = load_rimmer_dataset(input_size=5000,num_classes=num_classes,test_ratio=0.1,val_ratio=0.8)
         train_data = torch.tensor(train_data, dtype=torch.float32)
         train_labels = torch.tensor(train_labels, dtype=torch.int)
         test_data = torch.tensor(test_data, dtype=torch.float32)
@@ -498,5 +504,12 @@ def main():
     return final_results
 
 
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description='Test deep neural network by HAAD')
+    parser.add_argument('--dataset', '-d', default='rimmer500', type=str, choices=['rimmer100','rimmer200','rimmer500','rimmer900','sirinam'],help='choose model type cnn, lstm or sdae')
+    args = parser.parse_args()
+    datatype = args.dataset
+    num_classes = data_dict[datatype]
     results = main()
