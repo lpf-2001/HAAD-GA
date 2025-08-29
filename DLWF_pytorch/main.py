@@ -1,25 +1,29 @@
+import argparse
 import datetime
-import pytz
-import torch.nn as nn
 import numpy as np
 import os
+import pytz
 import sys
-import argparse
 import torch
+import torch.nn as nn
 import torch.optim as optim
-from torchsummary import summary
-from torch.cuda.amp import autocast, GradScaler
-from torch.utils.data import DataLoader, Dataset, random_split, Subset
-from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score, roc_auc_score
-from tqdm import tqdm 
-import sys 
-import os
+
 parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__),'../utils'))
 sys.path.append(parent_dir)
 
-from configobj import ConfigObj
-from model.model import *
+
 from data import *
+from tqdm import tqdm 
+from model.model import *
+from configobj import ConfigObj
+from torchsummary import summary
+from torch.nn.utils import clip_grad_norm_
+from torch.cuda.amp import autocast, GradScaler
+from torch.utils.data import DataLoader, Dataset, random_split, Subset
+from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score, roc_auc_score
+
+
+
 
 # torch.cuda.empty_cache()
 
@@ -37,36 +41,74 @@ num_classes_dict = {
     }
 num_classes = None
 datatype = None
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import numpy as np
+import torch.optim as optim
 
 
+class LabelSmoothingLoss(nn.Module):
+    def __init__(self, smoothing=0.1):
+        super().__init__()
+        self.smoothing = smoothing
 
-class SmoothCELoss(nn.Module):
-    def __init__(self, s=0.001):
-        super(SmoothCELoss, self).__init__()
-        self.s = s
-
-    def forward(self, logits, targets):
+    def forward(self, pred, target):
         """
-        logits: [batch, C]，模型输出（未经过 softmax）
-        targets: [batch]，类别标签（非 one-hot）
+        pred: [B, num_classes]
+        target: [B, num_classes] (one-hot or soft labels)
         """
-        batch_size, num_classes = logits.size()
-
-        # softmax 得到概率
-        probs = F.softmax(logits, dim=1)
-
-        # one-hot 编码
-        y_onehot = F.one_hot(targets, num_classes=num_classes).float()
-
-        # 第一项：标准交叉熵 (加权 (1-s))
-        ce_loss = -(y_onehot * torch.log(probs + 1e-12)).sum(dim=1).mean()
-
-        # 第二项：所有类别的 log(probs)，相当于熵惩罚 (加权 s)
-        smooth_loss = -torch.log(probs + 1e-12).sum(dim=1).mean()
-
-        # 最终 loss
-        loss = (1 - self.s) * ce_loss + self.s * smooth_loss
+        log_probs = F.log_softmax(pred, dim=-1)
+        
+        # 对 soft/one-hot target 做平滑
+        # target_smooth = target * (1 - smoothing) + smoothing / num_classes
+        num_classes = pred.size(1)
+        target_smooth = target * (1.0 - self.smoothing) + self.smoothing / num_classes
+        
+        # cross-entropy
+        loss = torch.mean(torch.sum(-target_smooth * log_probs, dim=-1))
         return loss
+
+
+# ---- Mixup ----
+def mixup_data(x, y, alpha=0.2):
+    """
+    x: [B, ...], y: [B]
+    """
+    lam = np.random.beta(alpha, alpha) if alpha > 0 else 1.0
+    batch_size = x.size(0)
+    index = torch.randperm(batch_size).to(x.device)
+    mixed_x = lam * x + (1 - lam) * x[index]
+    y_a, y_b = y, y[index]
+    return mixed_x, y_a, y_b, lam
+
+def mixup_criterion(criterion, pred, y_a, y_b, lam):
+    return lam * criterion(pred, y_a) + (1 - lam) * criterion(pred, y_b)
+
+
+# ---- RandMask ----
+def random_mask(x, mask_ratio=0.1):
+    B, L = x.shape[:2]
+    mask = torch.rand(B, L, device=x.device) > mask_ratio
+    if x.ndim == 3:
+        mask = mask.unsqueeze(-1)
+    return x * mask.float()
+
+
+# ---- Optimizer & Scheduler ----
+def get_optimizer_scheduler(model, train_loader, num_epochs, lr=3e-4):
+    optimizer = optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-2)
+    total_steps = len(train_loader) * num_epochs
+    warmup_steps = int(0.05 * total_steps)
+
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return 0.5 * (1.0 + np.cos(np.pi * progress))  # Cosine decay
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    return optimizer, scheduler
 
 
 def log_config(id):
@@ -92,7 +134,7 @@ def log(id, s, dnn=None):
     elif dnn == "VARCNN":
         l = open(f'./trained_model/varcnn_{datatype}.out',"a")
     elif dnn == "LLM":
-        l = open(f'./trained_model/llm_{datatype}.out',"a")
+        l = open(f'./trained_model/new_llm_{datatype}.out',"a")
     if(id is not None):
         l.write("ID {} {}>\t{}\n".format(id,curtime().strftime('%H:%M:%S'),s))
     else:
@@ -132,19 +174,16 @@ def data_process(learn_param):
           
 
 @torch.inference_mode()
-def evaluate(model, loader, criterion, device, calc_metrics=False):
+def evaluate(model, loader, device, calc_metrics=False):
     model.eval()
-    total_loss, correct, total = 0.0, 0, 0
+    correct, total = 0, 0
     all_preds, all_labels = [], []
 
     for inputs, labels in tqdm(loader, desc="Evaluating", leave=False):
         inputs, labels = inputs.float().to(device), labels.float().to(device)
         targets = labels.argmax(1)  # 如果 labels 是 one-hot
         outputs = model(inputs)
-
-        total_loss += criterion(outputs, targets).item() * labels.size(0)
         preds = outputs.argmax(1)
-
         correct += (preds == targets).sum().item()
         total += labels.size(0)
 
@@ -152,7 +191,6 @@ def evaluate(model, loader, criterion, device, calc_metrics=False):
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(targets.cpu().numpy())
 
-    avg_loss = total_loss / total
     avg_acc = correct / total
 
     if calc_metrics:
@@ -162,9 +200,9 @@ def evaluate(model, loader, criterion, device, calc_metrics=False):
             "precision": precision_score(all_labels, all_preds, average='weighted'),
             "f1": f1_score(all_labels, all_preds, average='weighted')
         }
-        return avg_loss, avg_acc, metrics_sum
+        return avg_acc, metrics_sum
 
-    return avg_loss, avg_acc
+    return avg_acc
 
 def train_model(model, learn_param, model_train=True):
     # 参数
@@ -187,7 +225,8 @@ def train_model(model, learn_param, model_train=True):
     opt_kwargs = {k: opt_config.as_float(k) for k in opt_config if k != 'optimizer'}
     optimizer = optimizers[learn_param['optimizer']](model.parameters(), **opt_kwargs)
     if model_type == "LLM":
-        criterion = SmoothCELoss(s=0.005)
+        criterion = LabelSmoothingLoss(smoothing=0.1)
+        optimizer, scheduler = get_optimizer_scheduler(model, train_loader, epochs)
     else:
         criterion = nn.CrossEntropyLoss()
     best_f1 = 0
@@ -198,7 +237,7 @@ def train_model(model, learn_param, model_train=True):
         "ENSEMBLE": f"./trained_model/length_5000/ensemble_{datatype}.pth",
         "DF": f"./trained_model/length_5000/df_{datatype}.pth",
         "VARCNN": f"./trained_model/length_5000/varcnn_{datatype}.pth",
-        "LLM": f"./trained_model/length_5000/llm_{datatype}.pth"
+        "LLM": f"./trained_model/length_5000/new_llm_{datatype}.pth"
     }
 
     for epoch in range(epochs):
@@ -209,14 +248,16 @@ def train_model(model, learn_param, model_train=True):
             for batch_x, batch_y in tepoch:
                 optimizer.zero_grad()
                 batch_x, batch_y = batch_x.float().to(device), batch_y.float().to(device)
+                batch_x = random_mask(batch_x, mask_ratio=0.1)
+                batch_x, y_a, y_b, lam = mixup_data(batch_x, batch_y, alpha=0.2)
                 with autocast():
-                    outputs = model(batch_x)
-                    
-                    loss = criterion(outputs, batch_y.argmax(1))
+                    logits = model(batch_x)
+                    loss = mixup_criterion(criterion, logits, y_a, y_b, lam)
                 loss.backward()
+                clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
-
-                preds = outputs.argmax(1)
+                scheduler.step()
+                preds = logits.argmax(1)
                 batch_ = (preds == batch_y.argmax(1)).sum().item()
                 total_correct += batch_
                 batch = batch_y.size(0)
@@ -227,10 +268,10 @@ def train_model(model, learn_param, model_train=True):
 
         # 验证 & 测试
         if (epoch+1) % 5 == 0:
-            val_loss, val_acc = evaluate(model, val_loader, criterion, device)
-            log(None, f"Validation Loss: {val_loss:.2f}, Validation Accuracy: {100*val_acc:.2f}%\n", model_type)
+            val_acc = evaluate(model, val_loader, device)
+            log(None, f"Validation Accuracy: {100*val_acc:.2f}%\n", model_type)
 
-            _, _, metrics = evaluate(model, test_loader, criterion, device, calc_metrics=True)
+            _, metrics = evaluate(model, test_loader, device, calc_metrics=True)
             # 保存最优
             if metrics["f1"] > best_f1:
                 torch.save(model.state_dict(), save_paths[model_type])

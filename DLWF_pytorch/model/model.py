@@ -487,48 +487,25 @@ class DFNet(nn.Module):
     
 
 
-class ScaleFusion(nn.Module):
-    def __init__(self, channels: int, num_scales: int):
+import math
+from typing import List
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+# ------------------ 复用/小组件 ------------------
+
+class DepthwiseSeparableConv1d(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size=7, stride=1, padding=None, bias=False):
         super().__init__()
-        # 时间注意力：学习每个时间点的重要性
-        self.temporal_attn = nn.Sequential(
-            nn.Conv1d(channels, 1, kernel_size=1),   # [B,1,T]
-            nn.Softmax(dim=-1)                       # 时间维度归一化
-        )
-        # 尺度注意力：学习每个尺度的重要性
-        self.scale_attn = nn.Sequential(
-            nn.Linear(channels, channels // 4),
-            nn.ReLU(inplace=True),
-            nn.Linear(channels // 4, 1)              # 输出 [B,k,1]
-        )
-
-    def forward(self, aligned: List[torch.Tensor]):  
-        # aligned: k * [B,C,T]
-        B, C, T = aligned[0].shape
-        k = len(aligned)
-
-        # ---- 时间注意力 ----
-        ctx = []
-        for a in aligned:
-            # a: [B,C,T]
-            score_t = self.temporal_attn(a)           # [B,1,T]
-            ctx_a = (a * score_t).sum(dim=-1)         # [B,C] 时间加权和
-            ctx.append(ctx_a)
-        ctx = torch.stack(ctx, dim=1)                 # [B,k,C]
-
-        # ---- 尺度注意力 ----
-        scores = self.scale_attn(ctx)                 # [B,k,1]
-        weights = torch.softmax(scores.squeeze(-1), dim=1)  # [B,k]
-
-        # ---- 融合 ----
-        aligned_stack = torch.stack(aligned, dim=1)   # [B,k,C,T]
-        weights = weights.unsqueeze(-1).unsqueeze(-1) # [B,k,1,1]
-        fused = (aligned_stack * weights).sum(dim=1)  # [B,C,T]
-
-        return fused
-
-
-# --------- 小组件 ----------
+        if padding is None:
+            padding = kernel_size // 2
+        self.dw = nn.Conv1d(in_ch, in_ch, kernel_size, stride=stride, padding=padding,
+                            groups=in_ch, bias=bias)
+        self.pw = nn.Conv1d(in_ch, out_ch, kernel_size=1, bias=bias)
+    def forward(self, x):
+        return self.pw(self.dw(x))
 
 class SqueezeExcite1d(nn.Module):
     def __init__(self, channels: int, reduction: int = 8):
@@ -544,19 +521,7 @@ class SqueezeExcite1d(nn.Module):
     def forward(self, x):
         return x * self.fc(x)
 
-class DepthwiseSeparableConv1d(nn.Module):
-    def __init__(self, in_ch, out_ch, kernel_size=7, stride=1, padding=None, bias=False):
-        super().__init__()
-        if padding is None:
-            padding = kernel_size // 2
-        self.dw = nn.Conv1d(in_ch, in_ch, kernel_size, stride=stride, padding=padding,
-                            groups=in_ch, bias=bias)
-        self.pw = nn.Conv1d(in_ch, out_ch, kernel_size=1, bias=bias)
-    def forward(self, x):
-        return self.pw(self.dw(x))
-
 class DropPath(nn.Module):
-    """Stochastic Depth. 按样本随机丢弃残差分支。"""
     def __init__(self, drop_prob: float = 0.0):
         super().__init__()
         self.drop_prob = drop_prob
@@ -576,12 +541,9 @@ def sinusoidal_pos_encoding(L: int, C: int, device):
     pe[:, 1::2] = torch.cos(position * div_term)
     return pe  # [L, C]
 
-# --------- 改进后的下采样块 ----------
+# ------------------ 下采样块（复用并轻微调整） ------------------
 
 class DownBlock(nn.Module):
-    """
-    stride=2 下采样；深度可分离卷积 + SE + 残差。通道保持不变以节省显存。
-    """
     def __init__(self, channels: int, p_drop: float = 0.1):
         super().__init__()
         self.conv1 = DepthwiseSeparableConv1d(channels, channels, kernel_size=7, stride=2)
@@ -592,7 +554,7 @@ class DownBlock(nn.Module):
         self.act2  = nn.GELU()
         self.se    = SqueezeExcite1d(channels)
         self.drop  = nn.Dropout(p_drop)
-        self.pool_res = nn.AvgPool1d(kernel_size=2, stride=2)  # 残差支路下采样
+        self.pool_res = nn.AvgPool1d(kernel_size=2, stride=2)
     def forward(self, x):  # x: [B, C, L]
         identity = self.pool_res(x)
         out = self.conv1(x)
@@ -603,31 +565,161 @@ class DownBlock(nn.Module):
         out = self.drop(out)
         return out + identity  # [B, C, L/2]
 
-# --------- 主模型 ----------
+# ------------------ Cross-Scale Attention（替代 ScaleFusion） ------------------
+
+class CrossScaleAttention(nn.Module):
+    """
+    使用尺度间 self-attention 去学习尺度交互，再用 attention weights 做加权融合。
+    aligned: List[k] of [B, C, T]
+    输出: [B, C, T]
+    """
+    def __init__(self, channels: int, num_scales: int, num_heads: int = 4):
+        super().__init__()
+        self.num_scales = num_scales
+        # 我们对每个尺度先做一个小的 projection 以稳定训练（可选）
+        self.scale_proj = nn.ModuleList([nn.Conv1d(channels, channels, kernel_size=1) for _ in range(num_scales)])
+        # 跨尺度的 attention（在 pooled context 上）
+        # embed_dim = channels
+        self.attn = nn.MultiheadAttention(channels, num_heads, batch_first=True)
+        # 一个小 MLP 映射出每个尺度的最终权重 logit
+        self.score_mlp = nn.Sequential(
+            nn.LayerNorm(channels),
+            nn.Linear(channels, channels // 4),
+            nn.ReLU(inplace=True),
+            nn.Linear(channels // 4, 1),
+        )
+
+    def forward(self, aligned: List[torch.Tensor]):
+        """
+        aligned: k * [B, C, T]
+        """
+        k = len(aligned)
+        B, C, T = aligned[0].shape
+        # pool each scale to [B, C]
+        pooled = []
+        for i, a in enumerate(aligned):
+            a_proj = self.scale_proj[i](a)   # [B, C, T]
+            v = F.adaptive_avg_pool1d(a_proj, 1).squeeze(-1)  # [B, C]
+            pooled.append(v)
+        pooled = torch.stack(pooled, dim=1)  # [B, k, C]
+
+        # cross-scale attention on pooled tokens
+        # MultiheadAttention expects [B, seq, dim] with batch_first=True
+        attn_out, _ = self.attn(pooled, pooled, pooled)  # [B, k, C]
+
+        # compute scale weights from attn_out (per-scale context)
+        scores = self.score_mlp(attn_out)                # [B, k, 1]
+        weights = torch.softmax(scores.squeeze(-1), dim=1)  # [B, k]
+
+        aligned_stack = torch.stack(aligned, dim=1)   # [B, k, C, T]
+        weights = weights.unsqueeze(-1).unsqueeze(-1) # [B, k, 1, 1]
+        fused = (aligned_stack * weights).sum(dim=1)  # [B, C, T]
+        return fused
+
+# ------------------ ConvFormer 混合块 ------------------
+
+class ConvFormerBlock(nn.Module):
+    """
+    先 local conv (depthwise) 分支 -> residual, 再轻量 self-attn 分支 -> FFN。
+    输入: [B, T, D]
+    """
+    def __init__(self, dim, num_heads=4, attn_dropout=0.1, conv_kernel=5, drop=0.0, drop_path=0.0):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads, batch_first=True,
+                                          dropout=attn_dropout)
+        self.drop = nn.Dropout(attn_dropout)
+        self.drop_path1 = DropPath(drop_path)
+
+        # conv branch (operate on [B, D, T])
+        self.conv_dw = nn.Conv1d(dim, dim, kernel_size=conv_kernel, padding=conv_kernel//2, groups=dim)
+        self.conv_pw = nn.Conv1d(dim, dim, kernel_size=1)
+        self.gelu = nn.GELU()
+        self.norm_conv = nn.LayerNorm(dim)
+        self.drop_path2 = DropPath(drop_path)
+
+        # ffn
+        self.norm2 = nn.LayerNorm(dim)
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, dim*4),
+            nn.GELU(),
+            nn.Dropout(drop),
+            nn.Linear(dim*4, dim),
+        )
+        self.drop_path3 = DropPath(drop_path)
+
+    def forward(self, x):  # x: [B, 1+T, D] or [B, T, D] depending how used
+        # assume caller gives full sequence including cls; we skip cls for conv branch by applying conv to full seq but it's OK
+        # attention branch (global)
+        x_norm = self.norm1(x)
+        attn_out, _ = self.attn(x_norm, x_norm, x_norm, need_weights=False)
+        x = x + self.drop_path1(self.drop(attn_out))
+
+        # conv branch: apply on sequence tokens (including cls — it's fine)
+        # permute to [B, D, T]
+        b, L, D = x.shape
+        conv_input = x.permute(0, 2, 1)  # [B, D, L]
+        conv_out = self.conv_dw(conv_input)
+        conv_out = self.gelu(conv_out)
+        conv_out = self.conv_pw(conv_out)  # [B, D, L]
+        conv_out = conv_out.permute(0, 2, 1)  # [B, L, D]
+        x = x + self.drop_path2(conv_out)
+
+        # ffn
+        x_norm = self.norm2(x)
+        ffn_out = self.ffn(x_norm)
+        x = x + self.drop_path3(self.drop(ffn_out))
+        return x
+
+# ------------------ Attention Pooling（替代单 CLS） ------------------
+
+class AttentionPool(nn.Module):
+    """
+    Learnable pooling queries -> attend over sequence -> produce pooled tokens.
+    num_queries typically 1 or few (we use 1 here but keep flexible).
+    Input: [B, T, D] (without cls)
+    Output: [B, num_queries, D]
+    """
+    def __init__(self, dim, num_queries=1, num_heads=4, dropout=0.0):
+        super().__init__()
+        self.num_queries = num_queries
+        self.queries = nn.Parameter(torch.randn(1, num_queries, dim) * 0.02)
+        self.attn = nn.MultiheadAttention(dim, num_heads, batch_first=True, dropout=dropout)
+    def forward(self, x):  # x: [B, T, D]
+        B, T, D = x.shape
+        q = self.queries.expand(B, -1, -1)  # [B, Q, D]
+        out, _ = self.attn(q, x, x, need_weights=False)  # [B, Q, D]
+        return out
+
+# ------------------ 最终模型：MultiScaleLLM_V3 ------------------
 
 class MultiScaleLLM_V2(nn.Module):
     """
-    改进版：数值输入→Conv stem→多尺度残差下采样→尺度注意力融合→
-    位置编码→(浅层)Transformer→CLS池化→MLP分类头
+    改进版（V2）:
+      - Conv stem -> 多尺度 DownBlock 提取
+      - CrossScaleAttention 融合尺度
+      - proj -> ConvFormerBlocks（局部 conv + 轻量 attn）
+      - AttentionPool + CLS -> head
     """
     def __init__(
         self,
         num_classes: int = 100,
         conv_channels: int = 128,
         downsample_layers: int = 3,
-        attn_dim: int = 128,           # 注意力维度 = 通道数，简化对齐
+        attn_dim: int = 128,           # D
         attn_heads: int = 4,
-        attn_layers: int = 8,          # 先从 2~4 层开始，稳了再加深
+        attn_layers: int = 4,          # 2~4 层通常够
         attn_dropout: float = 0.1,
         drop_path: float = 0.1,
-        fuse_mode: str = 'gated'       # 'gated' | 'sum' | 'concat'
+        fuse_mode: str = 'cross',      # 'cross' | 'sum' | 'concat'
+        pool_queries: int = 1
     ):
         super().__init__()
-        assert fuse_mode in ('gated', 'sum', 'concat')
+        assert fuse_mode in ('cross', 'sum', 'concat')
         self.fuse_mode = fuse_mode
-        
+        self.conv_channels = conv_channels
 
-        # ---- 输入是 [-1, +1] 的标量序列：用 Conv1d 当作 stem（比 Embedding 更贴合连续信号）
+        # stem
         self.stem = nn.Sequential(
             nn.Conv1d(1, conv_channels, kernel_size=7, padding=3, bias=False),
             nn.BatchNorm1d(conv_channels, eps=1e-5),
@@ -637,120 +729,114 @@ class MultiScaleLLM_V2(nn.Module):
             nn.GELU(),
         )
 
-        # ---- 多尺度残差下采样
+        # down blocks
         self.down_blocks = nn.ModuleList([DownBlock(conv_channels, p_drop=0.1)
                                           for _ in range(downsample_layers)])
+        self.num_scales = downsample_layers
 
-        # ---- 多尺度融合（learnable gated attention）
+        # scale fusion
         if fuse_mode == 'concat':
             fused_channels = conv_channels * downsample_layers
         else:
             fused_channels = conv_channels
 
-        self.scale_attn = None
-        # 标准化各尺度的全局上下文，生成尺度权重
-        
-        if fuse_mode == 'gated':
-            self.scale_attn = ScaleFusion(fused_channels, downsample_layers)
+        if fuse_mode == 'cross':
+            self.scale_attn = CrossScaleAttention(conv_channels, downsample_layers, num_heads=max(1, attn_heads//1))
+        else:
+            self.scale_attn = None
+
+        # projection to attn_dim
         self.proj = nn.Linear(fused_channels, attn_dim)
 
-        # ---- Transformer（Pre-Norm + DropPath）
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, attn_dim))
+        # positional encoding (sinusoidal cached)
         self.pos_cache_len = 0
         self.pos_cache = None
 
+        # convformer blocks
         self.blocks = nn.ModuleList()
         dp_rates = torch.linspace(0, drop_path, attn_layers).tolist()
         for i in range(attn_layers):
-            self.blocks.append(nn.ModuleDict({
-                "norm1": nn.LayerNorm(attn_dim),
-                "attn": nn.MultiheadAttention(embed_dim=attn_dim, num_heads=attn_heads,
-                                              dropout=attn_dropout, batch_first=True),
-                "drop_path1": DropPath(dp_rates[i]),
-                "norm2": nn.LayerNorm(attn_dim),
-                "ffn": nn.Sequential(
-                    nn.Linear(attn_dim, attn_dim*4),
-                    nn.GELU(),
-                    nn.Dropout(attn_dropout),
-                    nn.Linear(attn_dim*4, attn_dim),
-                ),
-                "drop_path2": DropPath(dp_rates[i]),
-                "drop": nn.Dropout(attn_dropout),
-            }))
+            self.blocks.append(ConvFormerBlock(attn_dim, num_heads=attn_heads, attn_dropout=attn_dropout,
+                                               conv_kernel=5, drop=attn_dropout, drop_path=dp_rates[i]))
+            # note: +1 is used to allow a small extra channel if we append a length token; we'll handle shapes later
 
-        # ---- 分类头（更简洁）
-        self.head = nn.Sequential(
-            nn.LayerNorm(attn_dim),
-            nn.Linear(attn_dim, attn_dim*2),
-            nn.GELU(),
-            nn.Dropout(0.3),
-            nn.Linear(attn_dim*2, num_classes)
-        )
-
-        # 参数初始化
+        # attention pooling + cls token
+        self.pool = AttentionPool(attn_dim, num_queries=pool_queries, num_heads=attn_heads, dropout=attn_dropout)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, attn_dim))
         nn.init.trunc_normal_(self.cls_token, std=0.02)
 
+        # head
+        head_dim = attn_dim * (1 + pool_queries)  # concat cls + pooled tokens
+        self.head = nn.Sequential(
+            nn.LayerNorm(head_dim),
+            nn.Linear(head_dim, head_dim * 2),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Linear(head_dim * 2, num_classes)
+        )
+
     def _pos_encoding(self, L: int, C: int, device):
-        # 简单缓存，避免每步重算
+        # cache sinusoidal
         if self.pos_cache is None or self.pos_cache_len < L:
             pe = sinusoidal_pos_encoding(L, C, device)
-            self.pos_cache = pe  # [L, C]
+            self.pos_cache = pe
             self.pos_cache_len = L
         return self.pos_cache[:L]
 
     def forward(self, x: torch.Tensor):
         """
-        x: [B, L] 或 [B, L, 1]，值为 -1/+1 的数值序列
+        x: [B, L] or [B, L, 1], values -1/+1
         """
         if x.ndim == 3 and x.size(-1) == 1:
-            x = x.squeeze(-1)          # [B, L]
+            x = x.squeeze(-1)
         x = x.float()
-        x = x.unsqueeze(1)             # [B, 1, L]
+        x = x.unsqueeze(1)  # [B, 1, L]
 
-        # stem + 多尺度提取
-        feat = self.stem(x)            # [B, C, L]
+        feat = self.stem(x)  # [B, C, L]
         features: List[torch.Tensor] = []
         y = feat
         for blk in self.down_blocks:
-            y = blk(y)                 # [B, C, L_i]
+            y = blk(y)
             features.append(y)
 
-        # 对齐长度（到最小尺度）
+        # align lengths to smallest scale
         target_len = features[-1].size(-1)
-        aligned = [f if f.size(-1) == target_len
-                   else F.adaptive_avg_pool1d(f, output_size=target_len) for f in features]  # k*[B,C,T]
+        aligned = [f if f.size(-1) == target_len else F.adaptive_avg_pool1d(f, output_size=target_len)
+                   for f in features]  # k * [B, C, T]
 
-        # 多尺度融合
+        # fuse
         if self.fuse_mode == 'concat':
             fused = torch.cat(aligned, dim=1)  # [B, C*k, T]
         elif self.fuse_mode == 'sum':
             fused = torch.stack(aligned, dim=0).sum(dim=0)  # [B, C, T]
-        else:# 'gated'
-            fused = self.scale_attn(aligned)  # [B, C, 1]
+        else:  # cross
+            fused = self.scale_attn(aligned)  # [B, C, T]
 
-        # 到序列维度 [B, T, C] 并线性投影到注意力维
-        fused = fused.permute(0, 2, 1)                          # [B, T, C*? or C]
-        fused = self.proj(fused)                                # [B, T, D]
+        # [B, T, C']
+        fused = fused.permute(0, 2, 1)  # [B, T, C']
+        fused = self.proj(fused)        # [B, T, D]
 
-        # 位置编码 + CLS
         B, T, D = fused.shape
-        pe = self._pos_encoding(T, D, fused.device)             # [T, D]
+        pe = self._pos_encoding(T, D, fused.device)  # [T, D]
         fused = fused + pe.unsqueeze(0)
 
-        cls = self.cls_token.expand(B, -1, -1)                  # [B, 1, D]
-        seq = torch.cat([cls, fused], dim=1)                    # [B, 1+T, D]
+        # Attention pooling: get pooled tokens (Q queries attend to fused)
+        pooled = self.pool(fused)  # [B, Q, D]
+        # cls token
+        cls = self.cls_token.expand(B, -1, -1)  # [B,1,D]
 
-        # Transformer (Pre-Norm)
+        # combine sequence: we will form seq = [cls, pooled_tokens, fused_tokens]
+        seq = torch.cat([cls, pooled, fused], dim=1)  # [B, 1+Q+T, D]
+
+        # pass through ConvFormer blocks
         for blk in self.blocks:
-            x_norm = blk["norm1"](seq)
-            attn_out, _ = blk["attn"](x_norm, x_norm, x_norm, need_weights=False)
-            seq = seq + blk["drop_path1"](blk["drop"](attn_out))
+            seq = blk(seq)  # [B, 1+Q+T, D]
 
-            x_norm = blk["norm2"](seq)
-            ffn_out = blk["ffn"](x_norm)
-            seq = seq + blk["drop_path2"](blk["drop"](ffn_out))
+        # aggregate final global representation: take cls and pooled tokens and concat
+        cls_out = seq[:, 0, :]                 # [B, D]
+        pooled_out = seq[:, 1:1 + pooled.size(1), :]  # [B, Q, D]
+        pooled_out = pooled_out.reshape(B, -1)  # [B, Q*D]
+        global_repr = torch.cat([cls_out, pooled_out], dim=1)  # [B, D + Q*D] = [B, head_dim]
 
-        # 取 CLS 作为全局表示
-        cls_out = seq[:, 0, :]                                   # [B, D]
-        logits = self.head(cls_out)                              # [B, num_classes]
+        logits = self.head(global_repr)
         return logits
