@@ -18,7 +18,7 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__),'../utils'))
 sys.path.append(parent_dir)
 
 from configobj import ConfigObj
-from model.model_5000 import *
+from model.model import *
 from data import *
 
 # torch.cuda.empty_cache()
